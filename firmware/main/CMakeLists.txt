@@ -1,0 +1,27 @@
+idf_component_register(
+    SRCS
+        main.cc
+        ai_cat_board.cc
+        cat_websocket.cc
+        wifi_manager.cc
+        i2c_device.cc
+        pca9557.cc
+        audio_codec.cc
+        box_audio_codec.cc
+        audio_pipeline.cc
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        driver
+        esp_codec_dev
+        esp_driver_i2s
+        esp_event
+        esp_netif
+        esp_wifi
+        esp_websocket_client
+        freertos
+        json
+        nvs_flash
+        esp-opus
+        esp-opus-encoder
+)

@@ -1,0 +1,14 @@
+{
+  "idf.currentSetup": "/home/zyf/espressif/esp-idf/v5.5.1/esp-idf",
+  "idf.customExtraVars": {},
+  "clangd.path": "/home/zyf/espressif/esp-idf/tools/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/home/zyf/Code/yf-ai-pet/build"
+  ],
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.port": "/dev/ttyACM0"
+}
