@@ -42,14 +42,18 @@ AudioEncoder::AudioEncoder(int sample_rate, int duration_ms)
 AudioEncoder::~AudioEncoder() = default;
 
 bool AudioEncoder::Encode(std::vector<int16_t>&& pcm, std::vector<uint8_t>& opus) {
+    return Encode(pcm.data(), (int)pcm.size(), opus);
+}
+
+bool AudioEncoder::Encode(const int16_t* pcm, int num_samples, std::vector<uint8_t>& opus) {
     if (!impl_ || !impl_->enc) return false;
-    if ((int)pcm.size() != impl_->frame_size) {
-        ESP_LOGW(TAG, "Encode: wrong PCM size %d, expected %d", (int)pcm.size(), impl_->frame_size);
+    if (num_samples != impl_->frame_size) {
+        ESP_LOGW(TAG, "Encode: wrong PCM size %d, expected %d", num_samples, impl_->frame_size);
         return false;
     }
 
     uint8_t buf[SAFE_OPUS_BUF_SIZE];
-    int ret = opus_encode(impl_->enc, pcm.data(), impl_->frame_size, buf, SAFE_OPUS_BUF_SIZE);
+    int ret = opus_encode(impl_->enc, pcm, impl_->frame_size, buf, SAFE_OPUS_BUF_SIZE);
 
     if (ret < 0) {
         ESP_LOGE(TAG, "opus_encode error: %d", ret);

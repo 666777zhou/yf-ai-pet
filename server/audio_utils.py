@@ -26,16 +26,28 @@ class OpusCodec:
 
 
 class VAD:
-    """Simple energy-based Voice Activity Detection."""
+    """Adaptive energy-based Voice Activity Detection.
 
-    def __init__(self, threshold: float = 0.05, silence_frames: int = 30):
-        self.threshold = threshold
+    Tracks ambient noise floor and adjusts threshold dynamically,
+    so it works for both loud and quiet speakers without tuning.
+    """
+
+    def __init__(self, silence_frames: int = 30):
+        # Adaptive threshold parameters
+        self._noise_floor = 0.005          # estimated ambient noise energy
+        self._noise_alpha = 0.05           # smoothing factor for noise floor update
+        self._speech_alpha = 0.2           # smoothing factor for speech energy
+        self._min_threshold = 0.008        # absolute minimum threshold
+        self._threshold_margin = 3.0       # multiplier: speech must be N× noise floor
+        self._current_threshold = 0.02     # initial threshold (updated adaptively)
+
         self.silence_frames = silence_frames
         self.silent_count = 0
         self.speaking = False
+        self._frame_count = 0
 
     def is_speech(self, pcm_data: np.ndarray) -> bool:
-        """Check if PCM frame contains speech based on energy.
+        """Check if PCM frame contains speech based on adaptive energy threshold.
 
         Returns True only when current frame has energy above threshold.
         The internal speaking/silent state tracks hangover separately.
@@ -44,8 +56,21 @@ class VAD:
             return False
 
         energy = np.sqrt(np.mean(pcm_data.astype(np.float32) ** 2)) / 32768.0
+        self._frame_count += 1
 
-        if energy > self.threshold:
+        # Periodically update noise floor from quiet frames
+        if not self.speaking and energy < self._current_threshold:
+            self._noise_floor = (
+                self._noise_alpha * energy +
+                (1 - self._noise_alpha) * self._noise_floor
+            )
+            # Recompute threshold: max of (margin × noise_floor) and min_threshold
+            self._current_threshold = max(
+                self._min_threshold,
+                self._threshold_margin * self._noise_floor
+            )
+
+        if energy > self._current_threshold:
             self.silent_count = 0
             self.speaking = True
             return True
@@ -57,12 +82,14 @@ class VAD:
             return False  # Only return True for actual speech, not hangover
 
     @property
-    def energy_threshold(self) -> float:
-        return self.threshold
+    def current_threshold(self) -> float:
+        """Current adaptive threshold (read-only, for debugging)."""
+        return self._current_threshold
 
-    @energy_threshold.setter
-    def energy_threshold(self, value: float):
-        self.threshold = value
+    @property
+    def noise_floor(self) -> float:
+        """Estimated ambient noise floor (read-only, for debugging)."""
+        return self._noise_floor
 
 
 def pcm_to_numpy(pcm_bytes: bytes) -> np.ndarray:

@@ -4,6 +4,7 @@
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/stream_buffer.h>
 #include <driver/gpio.h>
 #include <sys/time.h>
 
@@ -20,6 +21,11 @@ static AudioDecoder g_audio_decoder;
 static volatile bool g_audio_playing = false;
 static volatile int64_t g_last_audio_ms = 0;
 
+// Stream buffer for PCM frames: main loop → encoder task.
+// 40 frames × 1920 bytes gives ~2.4s of buffering headroom.
+#define ENCODER_STREAM_SIZE (AUDIO_FRAME_SAMPLES * sizeof(int16_t) * 40)
+static StreamBufferHandle_t g_encoder_stream = nullptr;
+
 static int64_t GetTimestampMs() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -27,12 +33,37 @@ static int64_t GetTimestampMs() {
 }
 
 static void ReadTouchSensors(int& head, int& back, int& belly) {
-    // Read capacitive touch values via ADC or touch pad API
-    // For now, use GPIO digital read as placeholder
-    // TODO: replace with touch_pad_read() when sensors are installed
     head  = gpio_get_level(TOUCH_HEAD_GPIO) ? 0 : 100;
     back  = gpio_get_level(TOUCH_BACK_GPIO) ? 0 : 100;
     belly = gpio_get_level(TOUCH_BELLY_GPIO) ? 0 : 100;
+}
+
+// Dedicated encoder task — opus_encode() needs 8-12KB stack,
+// so this task gets its own 32KB to avoid blowing up main task.
+static void EncoderTask(void* arg) {
+    int frame_count = 0;
+    int16_t pcm_buf[AUDIO_FRAME_SAMPLES];  // 1920 bytes on task stack
+    while (true) {
+        size_t received = xStreamBufferReceive(g_encoder_stream,
+                                               pcm_buf, sizeof(pcm_buf),
+                                               portMAX_DELAY);
+        if (received == sizeof(pcm_buf)) {
+            frame_count++;
+            std::vector<uint8_t> opus_frame;
+            // Encode from stack buffer (no heap allocation for PCM)
+            if (g_audio_encoder.Encode(pcm_buf, AUDIO_FRAME_SAMPLES, opus_frame)) {
+                if (g_websocket.IsConnected()) {
+                    g_websocket.SendAudio(opus_frame);
+                }
+                if (frame_count == 1) {
+                    ESP_LOGI(TAG, "Opus send OK: %d bytes/frame (was 1920 bytes raw PCM)",
+                             (int)opus_frame.size());
+                }
+            } else if (frame_count <= 3) {
+                ESP_LOGW(TAG, "Opus encode failed on frame %d", frame_count);
+            }
+        }
+    }
 }
 
 // Main application entry point
@@ -107,6 +138,11 @@ extern "C" void app_main(void) {
     // Status LED on = ready
     gpio_set_level(STATUS_LED_GPIO, 1);
 
+    // Create encoder stream buffer (wake encoder only when full frame arrives)
+    g_encoder_stream = xStreamBufferCreate(ENCODER_STREAM_SIZE,
+                                           AUDIO_FRAME_SAMPLES * sizeof(int16_t));
+    xTaskCreate(EncoderTask, "encoder", 32768, nullptr, 5, nullptr);
+
     // Main loop
     ESP_LOGI(TAG, "Entering main loop...");
     int64_t last_sensor_send = 0;
@@ -142,24 +178,16 @@ extern "C" void app_main(void) {
             g_audio_playing = false;
         }
 
-        // Mic capture → send raw PCM to server (skip during TTS playback)
+        // Mic capture → stream to encoder task (skip during TTS playback)
         auto* codec = board.GetAudioCodec();
         if (codec && codec->input_enabled() && !g_audio_playing) {
-            static int pcm_frame_count = 0;
             std::vector<int16_t> pcm(AUDIO_FRAME_SAMPLES, 0);
             int read = codec->Read(pcm.data(), AUDIO_FRAME_SAMPLES);
             if (read == AUDIO_FRAME_SAMPLES) {
-                pcm_frame_count++;
-                // Send raw PCM as binary frame
-                const uint8_t* raw = reinterpret_cast<const uint8_t*>(pcm.data());
-                std::vector<uint8_t> pcm_bytes(raw, raw + AUDIO_FRAME_SAMPLES * 2);
-                if (g_websocket.IsConnected()) {
-                    g_websocket.SendAudio(pcm_bytes);
-                    audio_sent_count++;
-                }
-                if (pcm_frame_count == 1) {
-                    ESP_LOGI(TAG, "PCM send OK: %d bytes/frame", (int)pcm_bytes.size());
-                }
+                // Send raw PCM bytes to encoder task via stream buffer (zero heap alloc)
+                xStreamBufferSend(g_encoder_stream,
+                                  pcm.data(), AUDIO_FRAME_SAMPLES * sizeof(int16_t),
+                                  0);
             }
         }
 

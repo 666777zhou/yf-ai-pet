@@ -1,0 +1,29 @@
+{
+  "active": "qwen-xiaoye",
+  "profiles": {
+    "qwen-xiaoye": {
+      "id": "qwen-xiaoye",
+      "name": "小叶（克隆音色）",
+      "engine": "qwen-tts",
+      "model": "",
+      "ref_audio": "/home/zyf/Code/fish-speech/scripts/reference.wav",
+      "prompt_text": "那肯定是可以的啦，这是绝对没问题的。而且，不但会相处到一块儿去，还会关系贼拉好。而且，而且最重要的是，他俩会争风吃醋，为了你呀。"
+    },
+    "fish-default": {
+      "id": "fish-default",
+      "name": "Fish Speech 默认音色（纯合成）",
+      "engine": "fish-speech",
+      "model": "",
+      "ref_audio": "",
+      "prompt_text": ""
+    },
+    "piper-huayan": {
+      "id": "piper-huayan",
+      "name": "花烟（女声）",
+      "engine": "piper",
+      "model": "zh_CN-huayan-medium",
+      "ref_audio": "",
+      "prompt_text": ""
+    }
+  }
+}

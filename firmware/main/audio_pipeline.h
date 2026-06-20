@@ -17,11 +17,15 @@ public:
     explicit AudioEncoder(int sample_rate = AUDIO_SAMPLE_RATE, int duration_ms = AUDIO_FRAME_DURATION_MS);
     ~AudioEncoder();
 
-    // Encode PCM samples to Opus frame.
+    // Encode PCM samples to Opus frame (vector overload).
     // pcm: input — exactly AUDIO_FRAME_SAMPLES (960) int16_t samples
     // opus: output — encoded Opus bytes
     // Returns true on success
     bool Encode(std::vector<int16_t>&& pcm, std::vector<uint8_t>& opus);
+
+    // Encode PCM samples to Opus frame (raw pointer overload).
+    // Zero heap allocation — reads from caller-provided buffer.
+    bool Encode(const int16_t* pcm, int num_samples, std::vector<uint8_t>& opus);
 
 private:
     struct Impl;
