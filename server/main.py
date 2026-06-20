@@ -49,7 +49,14 @@ HOST = "0.0.0.0"
 PORT = 8080
 WHISPER_MODEL = "large-v3"  # "tiny", "small", "medium", "large-v2", "large-v3"
 
-# DeepSeek API config — set DEEPSEEK_API_KEY env var or replace the default
+# LLM provider: "ollama" (default) or "deepseek"
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
+
+# Ollama config (local)
+OLLAMA_API_URL = os.environ.get("OLLAMA_API_URL", "http://127.0.0.1:11434/api/chat")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
+
+# DeepSeek API config (fallback / legacy)
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"  # Non-reasoning model for simple chat (v4-flash reasons→empty content)
@@ -64,8 +71,79 @@ class AICatServer:
         self.tts = TTSEngine(voice_manager=self.voices)
         self.active_connection: CatConnection | None = None
 
-        self.llm, self.stt_corrector = self._create_deepseek_llm()
+        if LLM_PROVIDER == "ollama":
+            self.llm, self.stt_corrector = self._create_ollama_llm()
+        else:
+            self.llm, self.stt_corrector = self._create_deepseek_llm()
         self.brain = CatBrain(llm_callable=self.llm, stt_corrector=self.stt_corrector)
+
+    def _create_ollama_llm(self):
+        """Create LLM functions backed by local Ollama (Qwen3)."""
+        import httpx
+
+        client = httpx.AsyncClient(timeout=60.0)
+
+        async def ollama_llm(prompt: str) -> str:
+            """Cat personality response."""
+            try:
+                resp = await client.post(
+                    OLLAMA_API_URL,
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "think": False,
+                        "messages": [
+                            {"role": "system", "content": "你是一只名叫小咪的AI猫。用猫的视角回复，用括号标注动作和情绪如'(摇尾巴)你今天真好看'，自然口语化，不超过40字。括号内容不会被读出来，用于控制语气。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "options": {
+                            "num_predict": 60,
+                            "temperature": 0.9,
+                        },
+                        "stream": False,
+                    },
+                )
+                if resp.status_code == 200:
+                    content = resp.json().get("message", {}).get("content", "").strip()
+                    if content:
+                        logger.info(f"Ollama response: {content}")
+                    return content
+                else:
+                    logger.error(f"Ollama API error {resp.status_code}: {resp.text[:200]}")
+                    return ""
+            except Exception as e:
+                logger.error(f"Ollama API call failed: {e}")
+                return ""
+
+        async def ollama_correct_stt(prompt: str) -> str:
+            """STT correction — no cat personality, just text correction."""
+            try:
+                resp = await client.post(
+                    OLLAMA_API_URL,
+                    json={
+                        "model": OLLAMA_MODEL,
+                        "messages": [
+                            {"role": "user", "content": prompt},
+                        ],
+                        "options": {
+                            "num_predict": 120,
+                            "temperature": 0.3,
+                        },
+                        "enable_thinking": False,
+                        "stream": False,
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    content = data.get("message", {}).get("content", "").strip()
+                    return content
+                else:
+                    logger.error(f"Ollama STT API error {resp.status_code}: {resp.text[:200]}")
+                    return ""
+            except Exception as e:
+                logger.error(f"Ollama STT correction failed: {e}")
+                return ""
+
+        return ollama_llm, ollama_correct_stt
 
     def _create_deepseek_llm(self):
         """Create LLM functions for cat response and STT correction."""
@@ -268,7 +346,10 @@ class AICatServer:
         logger.info(f"STT: Faster-Whisper {WHISPER_MODEL} on CUDA")
         logger.info(f"TTS: {self.voices.get_active().name} ({self.voices.get_active().engine})"
                      f"{' + voice cloning' if self.voices.get_active().ref_audio else ''}")
-        logger.info(f"LLM: DeepSeek API ({DEEPSEEK_MODEL})")
+        if LLM_PROVIDER == "ollama":
+            logger.info(f"LLM: Ollama ({OLLAMA_MODEL} @ {OLLAMA_API_URL})")
+        else:
+            logger.info(f"LLM: DeepSeek API ({DEEPSEEK_MODEL})")
         logger.info(f"Voices: {len(self.voices.list_voices())} available — /voice list to see all")
 
         console_task = asyncio.create_task(self._console_reader())

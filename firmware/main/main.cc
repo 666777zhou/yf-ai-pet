@@ -21,9 +21,21 @@ static AudioDecoder g_audio_decoder;
 static volatile bool g_audio_playing = false;
 static volatile int64_t g_last_audio_ms = 0;
 
+// TODO: Display deferred render — disabled until display driver is verified.
+// static volatile bool g_display_needs_render = false;
+// static std::string g_display_emotion = "content";
+
 // Stream buffer for PCM frames: main loop → encoder task.
 // 40 frames × 1920 bytes gives ~2.4s of buffering headroom.
 #define ENCODER_STREAM_SIZE (AUDIO_FRAME_SAMPLES * sizeof(int16_t) * 40)
+
+// Static allocation for the stream buffer: control struct in DRAM (BSS),
+// storage buffer in PSRAM to avoid exhausting internal DRAM (~243KB).
+// pvPortMalloc used by xStreamBufferCreate is restricted to internal DRAM
+// (MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT), so a 77KB allocation easily fails
+// after WiFi/audio/Opus init fragments the heap.
+static StaticStreamBuffer_t g_encoder_stream_struct;
+static uint8_t* g_encoder_stream_storage = nullptr;
 static StreamBufferHandle_t g_encoder_stream = nullptr;
 
 static int64_t GetTimestampMs() {
@@ -44,6 +56,10 @@ static void EncoderTask(void* arg) {
     int frame_count = 0;
     int16_t pcm_buf[AUDIO_FRAME_SAMPLES];  // 1920 bytes on task stack
     while (true) {
+        if (g_encoder_stream == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
         size_t received = xStreamBufferReceive(g_encoder_stream,
                                                pcm_buf, sizeof(pcm_buf),
                                                portMAX_DELAY);
@@ -102,13 +118,7 @@ extern "C" void app_main(void) {
                 ESP_LOGI(TAG, "Command: emotion=%s ears=(%d,%d) vib=%d audio=%d",
                          cmd.emotion.c_str(), cmd.ear_left_deg, cmd.ear_right_deg,
                          cmd.vibration, cmd.has_audio);
-                // Update eye display based on emotion
-                auto* display = AiCatBoard::GetInstance().GetDisplay();
-                if (display) {
-                    display->SetEmotion(cmd.emotion);
-                    display->Render();
-                }
-                // TODO: execute servo/vibration actions
+                // TODO: update display, execute servo/vibration actions
             });
 
             // Set up audio handler: decode Opus → PCM → play through speaker
@@ -144,10 +154,29 @@ extern "C" void app_main(void) {
     // Status LED on = ready
     gpio_set_level(STATUS_LED_GPIO, 1);
 
-    // Create encoder stream buffer (wake encoder only when full frame arrives)
-    g_encoder_stream = xStreamBufferCreate(ENCODER_STREAM_SIZE,
-                                           AUDIO_FRAME_SAMPLES * sizeof(int16_t));
-    xTaskCreate(EncoderTask, "encoder", 32768, nullptr, 5, nullptr);
+    // Create encoder stream buffer with PSRAM storage (static allocation).
+    // Using heap_caps_calloc in PSRAM avoids the 77KB internal DRAM requirement
+    // that xStreamBufferCreate (pvPortMalloc → internal only) can't satisfy.
+    g_encoder_stream_storage = (uint8_t*)heap_caps_calloc(1, ENCODER_STREAM_SIZE,
+                                                          MALLOC_CAP_SPIRAM);
+    if (g_encoder_stream_storage) {
+        g_encoder_stream = xStreamBufferCreateStatic(
+            ENCODER_STREAM_SIZE,
+            AUDIO_FRAME_SAMPLES * sizeof(int16_t),
+            g_encoder_stream_storage,
+            &g_encoder_stream_struct);
+    }
+
+    if (g_encoder_stream == nullptr) {
+        ESP_LOGE(TAG, "Encoder stream buffer creation FAILED (size=%u). "
+                 "Internal DRAM may be too fragmented. "
+                 "Free internal heap: %lu",
+                 ENCODER_STREAM_SIZE, esp_get_free_internal_heap_size());
+    } else {
+        ESP_LOGI(TAG, "Encoder stream buffer OK: %u bytes in PSRAM",
+                 ENCODER_STREAM_SIZE);
+        xTaskCreate(EncoderTask, "encoder", 32768, nullptr, 5, nullptr);
+    }
 
     // Main loop
     ESP_LOGI(TAG, "Entering main loop...");
@@ -189,7 +218,7 @@ extern "C" void app_main(void) {
         if (codec && codec->input_enabled() && !g_audio_playing) {
             std::vector<int16_t> pcm(AUDIO_FRAME_SAMPLES, 0);
             int read = codec->Read(pcm.data(), AUDIO_FRAME_SAMPLES);
-            if (read == AUDIO_FRAME_SAMPLES) {
+            if (read == AUDIO_FRAME_SAMPLES && g_encoder_stream != nullptr) {
                 // Send raw PCM bytes to encoder task via stream buffer (zero heap alloc)
                 xStreamBufferSend(g_encoder_stream,
                                   pcm.data(), AUDIO_FRAME_SAMPLES * sizeof(int16_t),
@@ -199,6 +228,8 @@ extern "C" void app_main(void) {
 
         // Process incoming WebSocket messages
         g_websocket.ProcessIncoming(50);
+
+        // TODO: Deferred display render — disabled until display driver is verified
 
         // Log disconnection events
         static bool was_connected = false;

@@ -16,7 +16,8 @@ bool AiCatBoard::Initialize() {
     InitializeI2c();
     InitializeAudio();
     InitializeGpio();
-    InitializeDisplay();
+    // TODO: Display disabled until SPI driver verified
+    // InitializeDisplay();
 
     ESP_LOGI(TAG, "AI Cat board initialized successfully");
     return true;

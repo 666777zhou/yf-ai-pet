@@ -122,9 +122,9 @@ bool CatWebSocket::Connect(const std::string& url) {
     ws_cfg.keep_alive_count = 3;
     // Receive buffer: 4KB default may be too small for TTS audio frames
     ws_cfg.buffer_size = 16384;
-    // Internal task: priority 8, stack 12KB (Opus decode + I2S write needs ~8KB)
+    // Internal task: priority 8, stack 16KB (Opus decode + I2S write need headroom)
     ws_cfg.task_prio = 8;
-    ws_cfg.task_stack = 12288;
+    ws_cfg.task_stack = 16384;
 
     esp_websocket_client_handle_t client = esp_websocket_client_init(&ws_cfg);
     if (!client) {
