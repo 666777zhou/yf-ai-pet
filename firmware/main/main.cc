@@ -102,7 +102,13 @@ extern "C" void app_main(void) {
                 ESP_LOGI(TAG, "Command: emotion=%s ears=(%d,%d) vib=%d audio=%d",
                          cmd.emotion.c_str(), cmd.ear_left_deg, cmd.ear_right_deg,
                          cmd.vibration, cmd.has_audio);
-                // TODO: execute servo/vibration/LED actions
+                // Update eye display based on emotion
+                auto* display = AiCatBoard::GetInstance().GetDisplay();
+                if (display) {
+                    display->SetEmotion(cmd.emotion);
+                    display->Render();
+                }
+                // TODO: execute servo/vibration actions
             });
 
             // Set up audio handler: decode Opus → PCM → play through speaker

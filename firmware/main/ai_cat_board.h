@@ -4,7 +4,7 @@
 #include "box_audio_codec.h"
 #include "pca9557.h"
 #include "i2c_device.h"
-#include "wifi_manager.h"
+#include "display.h"
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
@@ -62,6 +62,7 @@ public:
     AudioCodec* GetAudioCodec() { return audio_codec_; }
     Pca9557* GetPca9557() { return pca9557_; }
     i2c_master_bus_handle_t GetI2cBus() { return i2c_bus_; }
+    EyeDisplay* GetDisplay() { return display_; }
 
 private:
     AiCatBoard() = default;
@@ -69,10 +70,12 @@ private:
     void InitializeI2c();
     void InitializeAudio();
     void InitializeGpio();
+    void InitializeDisplay();
 
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Pca9557* pca9557_ = nullptr;
     BoxAudioCodec* audio_codec_ = nullptr;
+    EyeDisplay* display_ = nullptr;
 };
 
 #endif // AI_CAT_BOARD_H

@@ -9,6 +9,7 @@ idf_component_register(
         audio_codec.cc
         box_audio_codec.cc
         audio_pipeline.cc
+        display.cc
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -16,6 +17,7 @@ idf_component_register(
         esp_codec_dev
         esp_driver_i2s
         esp_event
+        esp_lcd
         esp_netif
         esp_wifi
         esp_websocket_client

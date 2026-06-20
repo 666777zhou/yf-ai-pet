@@ -16,6 +16,7 @@ bool AiCatBoard::Initialize() {
     InitializeI2c();
     InitializeAudio();
     InitializeGpio();
+    InitializeDisplay();
 
     ESP_LOGI(TAG, "AI Cat board initialized successfully");
     return true;
@@ -93,4 +94,14 @@ void AiCatBoard::InitializeGpio() {
     gpio_config(&btn_cfg);
 
     ESP_LOGI(TAG, "GPIO initialized");
+}
+
+void AiCatBoard::InitializeDisplay() {
+    ESP_LOGI(TAG, "Initializing display (ST7789 320x240 SPI)...");
+    display_ = new EyeDisplay();
+    if (!display_->Initialize()) {
+        ESP_LOGE(TAG, "Display initialization failed");
+        delete display_;
+        display_ = nullptr;
+    }
 }

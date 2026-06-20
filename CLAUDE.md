@@ -116,22 +116,92 @@ pip install -r requirements.txt
 python main.py  # 监听 0.0.0.0:8080
 ```
 
-**LLM 接入：** 服务器端 `main.py:42` 的 `default_llm` 是一个占位函数，需要替换为实际的 3090 本地模型调用（vLLM / Ollama / llama.cpp）。
+**LLM 接入：** 当前使用 DeepSeek API（`deepseek-chat`），计划迁移到本地 Ollama + Qwen3-14B。
 
 ## 开发状态
 
 | 模块 | 状态 | 备注 |
 |------|------|------|
-| 固件框架 | ✅ 骨架完成 | main.cc 主循环、WebSocket、板级初始化已搭建 |
+| 固件框架 | ✅ 骨架完成 | main.cc 主循环、WebSocket、板级初始化 |
 | 音频链路 | ⚠️ 未调通 | 驱动代码就位，未在真实硬件上验证 |
 | 舵机控制 | 🔲 待实现 | PCA9685 驱动代码未编写 |
 | 触摸传感器 | ⚠️ 占位 | 目前用 GPIO 数字读代替电容触摸 API |
-| Opus 编码(固件) | 🔲 待实现 | 固件侧 Opus 编码未集成 |
+| Opus 编码(固件) | ✅ 已实现 | 固件侧 Opus 编码已集成（60ms帧, 32kbps） |
 | 服务器 WebSocket | ✅ 基本完成 | JSON 命令 + Opus 音频 + VAD + 情绪状态机 |
-| STT | ✅ 基本完成 | Faster-Whisper small on CUDA |
-| TTS | ✅ 基本完成 | Edge-TTS（需网络） |
-| LLM 集成 | ⚠️ 占位 | 关键词匹配占位，待接入本地模型 |
+| STT | ✅ 基本完成 | Faster-Whisper large-v3 on CUDA |
+| TTS | ✅ 多引擎 | Qwen3-TTS(默认,声音克隆) + Fish-Speech + Piper + GPT-SoVITS |
+| LLM 集成 | ⚠️ DeepSeek API | 待迁移到本地 Ollama + Qwen3-14B |
 | 硬件焊接 | 🔲 未开始 | 元件清单见 docs/quick-mvp-design.md |
+
+## TTS 引擎对比
+
+| 引擎 | 类型 | 速度 | 音质 | 声音克隆 | 启动方式 |
+|------|------|------|------|---------|---------|
+| Qwen3-TTS | 本地 HTTP (1.7B) | ~2.6s/句 | ⭐⭐⭐⭐⭐ | ✅ | `conda activate qwen3-tts && python tts_server.py` |
+| Fish-Speech | 本地 HTTP (4B) | ~14s/句 | ⭐⭐⭐⭐ | ✅ | `conda activate fish-speech && python tts_server.py` |
+| Piper | 进程内 ONNX | ~50ms/句 | ⭐⭐ | ❌ 固定音色 | 自动加载 |
+| GPT-SoVITS | HTTP API | — | ⭐⭐⭐ | ✅ | 端口 9872 |
+
+## 已完成的优化
+
+### Qwen3-TTS torch.compile（2026-06-20）
+- 文件：`/home/zyf/Code/Qwen3-TTS/tts_server.py`
+- `torch.compile(model.model, mode="reduce-overhead", fullgraph=False)`
+- 启动时自动 warmup（短文本触发 JIT 编译，首次 10-30s）
+- 环境变量 `QWEN_TTS_COMPILE=0` 可禁用
+- 预期收益：10-30% 推理延迟降低
+- `mode="reduce-overhead"` 使用 CUDA graphs 减少 kernel launch 开销
+
+## 参考项目：xiaozhi-esp32
+
+`~/Code/old/xiaozhi-esp32/` 是一个跑通了的 ESP32 语音交互项目，可作为显示驱动和硬件初始化的代码参考。
+
+### 架构
+
+```
+app_main()
+  → Application::Initialize()
+      → Board 初始化（I2C、SPI、音频、显示）
+      → display->SetupUI()
+      → 音频服务 + 网络回调注册
+  → Application::Run()
+      → FreeRTOS 事件循环
+      → 处理：网络、唤醒词、VAD、时钟、状态变化
+```
+
+### 显示子系统
+
+```
+Display（抽象基类）
+  → LvglDisplay → LcdDisplay → SpiLcdDisplay  （LVGL + SPI LCD）
+  → emote::EmoteDisplay                         （轻量 AAF 动画）
+  → OledDisplay                                 （OLED）
+```
+
+- 驱动芯片：ESP-IDF 内置 `esp_lcd` 组件（`esp_lcd_panel_st7789`、`esp_lcd_panel_ili9341` 等）
+- 立创开发板配置：ST7789，320×240，SPI3_HOST，MOSI=40, SCLK=41, DC=39, CS=NC, RST=NC, BL=42(反相)
+- 颜色格式：RGB565，16bpp
+- 可选 LVGL（`espressif__lvgl` 托管组件）或 `esp_emote_gfx` 轻量动画库
+
+### 音频
+
+- 与 AI 猫使用相同的 BoxAudioCodec（ES8311 + ES7210）
+- 采样率 24000（立创板），AI 猫用 16000
+- I2S 引脚：MCLK=38, BCLK=14, WS=13, DIN=12, DOUT=45
+- I2C 引脚：SDA=1, SCL=2
+- PCA9557 GPIO 扩展（0x19）控制音频功放
+
+### 关键文件速查
+
+| 文件 | 作用 |
+|------|------|
+| `main/application.cc` | 应用主循环、事件处理 |
+| `main/boards/common/board.h` | Board 抽象基类 |
+| `main/boards/lichuang-dev/lichuang_dev_board.cc` | 立创板实现（I2C/SPI/显示/触摸/摄像头） |
+| `main/boards/lichuang-dev/config.h` | 立创板引脚定义 |
+| `main/display/lcd_display.cc` | LVGL 显示核心（SetupUI、SetEmotion） |
+| `main/display/emote_display.cc` | Emote 轻量动画显示 |
+| `main/Kconfig.projbuild` | 电路板/显示/功能配置选项 |
 
 ## 关键设计决策
 

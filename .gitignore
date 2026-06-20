@@ -1,0 +1,28 @@
+# IDE / Editor
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# ESP-IDF / Firmware build artifacts
+firmware/build/
+firmware/.cache/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# ESP-IDF managed components (auto-generated, like node_modules)
+firmware/managed_components/
+
+# TTS models (large binary files, downloaded separately)
+server/tts_models/
+
+# Voice reference audio copies (large, stored elsewhere)
+server/voices/ref_*.wav
+server/voices/ref_*.mp3
+
+# OS
+.DS_Store
+Thumbs.db
