@@ -10,6 +10,7 @@ idf_component_register(
         box_audio_codec.cc
         audio_pipeline.cc
         display.cc
+        lvgl_display.cc
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -26,4 +27,6 @@ idf_component_register(
         nvs_flash
         esp-opus
         esp-opus-encoder
+        lvgl
+        lvgl_kawaii_face
 )

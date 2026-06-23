@@ -1,6 +1,8 @@
 """Cat personality engine: emotion state machine + LLM prompt."""
 from enum import Enum
 from typing import Optional
+import random
+import re
 import time
 
 
@@ -14,45 +16,114 @@ class Emotion(Enum):
 
 
 class EmotionStateMachine:
-    """Deterministic emotion transitions based on sensor inputs."""
+    """Dynamic emotion transitions driven by touch, speech, LLM output, and time."""
 
     def __init__(self):
         self.current = Emotion.CONTENT
         self.last_touch_time = time.time()
-        self.last_loud_sound = 0.0
+        self.last_speech_time = time.time()
+        self.last_emotion_change = time.time()
         self.touch_count = 0
+        self.conversation_turns = 0
 
-    def update(self, touch_values: list[int], has_speech: bool = False) -> Emotion:
-        """Update emotion based on touch sensor values and speech activity."""
+    def update(self, touch_values: list[int], has_speech: bool = False,
+               llm_response_text: str = "") -> Emotion:
+        """Update emotion based on inputs.
+
+        Args:
+            touch_values: [head, back, belly] touch sensor readings (0-100)
+            has_speech: True if user just spoke
+            llm_response_text: the cat's generated response (used to extract mood cues)
+        """
         now = time.time()
         max_touch = max(touch_values) if touch_values else 0
-        touch_active = max_touch > 30
+        touch_active = max_touch > 50
 
+        # ---- Track touch patterns ----
         if touch_active:
             self.last_touch_time = now
             self.touch_count += 1
         else:
-            # Decay touch count over time
-            if now - self.last_touch_time > 2.0:
+            if now - self.last_touch_time > 3.0:
                 self.touch_count = max(0, self.touch_count - 1)
 
-        # Over-stimulation: too much touching → annoyed
-        if self.touch_count > 20:
-            self.current = Emotion.ANNOYED
-        # Being touched + speech → playful/curious
+        if has_speech:
+            self.last_speech_time = now
+            self.conversation_turns += 1
+
+        # ---- Try to read emotion from LLM response ----
+        llm_emotion = None
+        if llm_response_text:
+            llm_emotion = self._extract_emotion_from_text(llm_response_text)
+
+        # ---- Emotion selection ----
+        new_emotion = self.current  # default: stay unchanged
+
+        if self.touch_count > 15:
+            # Over-stimulated → annoyed
+            new_emotion = Emotion.ANNOYED
         elif touch_active and has_speech:
-            self.current = Emotion.PLAYFUL
-        # Being touched gently → content
+            # Active petting + talking → vary between playful/curious/content
+            r = random.random()
+            if r < 0.40:
+                new_emotion = Emotion.PLAYFUL
+            elif r < 0.70:
+                new_emotion = Emotion.CURIOUS
+            else:
+                new_emotion = Emotion.CONTENT
+        elif llm_emotion:
+            # LLM response contains emotion cues → follow them
+            new_emotion = llm_emotion
+        elif has_speech:
+            # Speech without touch → engaged but varied
+            r = random.random()
+            if r < 0.25:
+                new_emotion = Emotion.CURIOUS
+            elif r < 0.45:
+                new_emotion = Emotion.PLAYFUL
+            else:
+                new_emotion = Emotion.CONTENT
         elif touch_active:
-            self.current = Emotion.CONTENT
-        # No interaction for a while → sleepy
-        elif now - self.last_touch_time > 30:
-            self.current = Emotion.SLEEPY
-        # Default: content
+            # Gentle petting without speech → content
+            new_emotion = Emotion.CONTENT
+        elif now - self.last_touch_time > 60 and now - self.last_speech_time > 60:
+            # Long idle → sleepy
+            new_emotion = Emotion.SLEEPY
+        elif (now - self.last_emotion_change > 20 and
+              now - self.last_speech_time > 10 and
+              random.random() < 0.12):
+            # Occasional spontaneous mood swing when idle
+            new_emotion = random.choice([Emotion.CONTENT, Emotion.CURIOUS, Emotion.PLAYFUL])
         else:
-            self.current = Emotion.CONTENT
+            # Default: relaxed content
+            new_emotion = Emotion.CONTENT
+
+        if new_emotion != self.current:
+            self.current = new_emotion
+            self.last_emotion_change = now
 
         return self.current
+
+    def _extract_emotion_from_text(self, text: str) -> Emotion | None:
+        """Parse cat's response for parenthetical emotion cues like '(开心地摇尾巴)'."""
+        match = re.search(r'[（(]([^）)]*)[）)]', text)
+        if not match:
+            return None
+        hint = match.group(1)
+
+        if any(w in hint for w in ['开心', '高兴', '摇尾巴', '呼噜', '蹭', '眯眼笑']):
+            return Emotion.CONTENT
+        if any(w in hint for w in ['兴奋', '玩', '跳', '追', '扑', '跑']):
+            return Emotion.PLAYFUL
+        if any(w in hint for w in ['好奇', '歪头', '盯', '闻', '嗅', '竖耳朵']):
+            return Emotion.CURIOUS
+        if any(w in hint for w in ['困', '哈欠', '眯眼', '懒', '趴']):
+            return Emotion.SLEEPY
+        if any(w in hint for w in ['生气', '炸毛', '哼', '不开心', '扭头']):
+            return Emotion.ANNOYED
+        if any(w in hint for w in ['怕', '吓', '躲', '缩', '发抖']):
+            return Emotion.SCARED
+        return None
 
     def to_command(self) -> dict:
         """Convert current emotion to actuator commands."""
@@ -106,8 +177,8 @@ class CatBrain:
     def __init__(self, llm_callable=None, stt_corrector=None):
         self.emotion_fsm = EmotionStateMachine()
         self.llm = llm_callable  # async function: llm(prompt) -> str
-        self.stt_corrector = stt_corrector  # async function for STT correction (no cat persona)
-        self.conversation_history: list[str] = []  # for STT correction context
+        self.stt_corrector = stt_corrector  # async function for STT correction
+        self.conversation_history: list[str] = []
 
     async def correct_stt(self, raw_text: str) -> str:
         """Use LLM to correct STT recognition errors (homophones, omissions).
@@ -115,15 +186,13 @@ class CatBrain:
         Returns corrected text. If correction fails, returns raw_text unchanged.
         If no corrector is available, returns raw_text unchanged.
         """
-        corrector = self.stt_corrector or self.llm  # fall back to main llm
+        corrector = self.stt_corrector or self.llm
         if not corrector or not raw_text.strip():
             return raw_text
 
-        # Skip correction for very short utterances (likely correct)
         if len(raw_text.strip()) <= 2:
             return raw_text.strip()
 
-        # Build context from conversation history
         context = "无" if not self.conversation_history else \
             " | ".join(self.conversation_history[-5:])
 
@@ -135,7 +204,6 @@ class CatBrain:
         try:
             corrected = await corrector(prompt)
             corrected = corrected.strip()
-            # Guard: if correction is wildly different, keep original
             if not corrected:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -175,24 +243,27 @@ class CatBrain:
         tv = touch_values or [0, 0, 0]
         has_speech = user_text is not None and len(user_text.strip()) > 0
 
-        # Update emotion
-        self.emotion_fsm.update(tv, has_speech)
-
-        # Build command
-        command = self.emotion_fsm.to_command()
-
-        # If user spoke, generate cat response
+        # Generate LLM response first if user spoke
+        llm_response = ""
         if has_speech and self.llm:
             prompt = CAT_PERSONALITY_PROMPT.format(
                 emotion=self.emotion_fsm.current.value,
                 user_text=user_text
             )
             try:
-                response_text = await self.llm(prompt)
-                command["response_text"] = response_text.strip()
-                command["has_audio"] = True
-            except Exception as e:
-                command["response_text"] = "喵~"
-                command["has_audio"] = True
+                llm_response = (await self.llm(prompt)).strip()
+            except Exception:
+                llm_response = "喵~"
+
+        # Update emotion: considers touch, speech, AND the LLM's response text
+        # This way the cat's own words influence its mood
+        self.emotion_fsm.update(tv, has_speech, llm_response)
+
+        # Build command
+        command = self.emotion_fsm.to_command()
+
+        if llm_response:
+            command["response_text"] = llm_response
+            command["has_audio"] = True
 
         return command

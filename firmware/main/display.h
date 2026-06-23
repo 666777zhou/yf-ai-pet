@@ -38,6 +38,7 @@ public:
     void SetEmotion(const std::string& emotion);
     void Render();
     void SetBacklight(bool on);
+    void DrawBitmap(int x_start, int y_start, int x_end, int y_end, const uint16_t* data);
 
 private:
     void FillRect(int x, int y, int w, int h, uint16_t color);

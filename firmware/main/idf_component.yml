@@ -1,3 +1,4 @@
 dependencies:
   espressif/esp_websocket_client: "^1.4.0"
   78/esp-opus-encoder: "~2.4.1"
+  lvgl/lvgl: "~9.2.0"

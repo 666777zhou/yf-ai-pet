@@ -2,6 +2,11 @@
 #include "pca9557.h"
 
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <driver/ledc.h>
+#include <driver/spi_common.h>
+#include <esp_heap_caps.h>
 
 #define TAG "AiCatBoard"
 
@@ -16,8 +21,7 @@ bool AiCatBoard::Initialize() {
     InitializeI2c();
     InitializeAudio();
     InitializeGpio();
-    // TODO: Display disabled until SPI driver verified
-    // InitializeDisplay();
+    InitializeDisplay();
 
     ESP_LOGI(TAG, "AI Cat board initialized successfully");
     return true;
@@ -99,10 +103,73 @@ void AiCatBoard::InitializeGpio() {
 
 void AiCatBoard::InitializeDisplay() {
     ESP_LOGI(TAG, "Initializing display (ST7789 320x240 SPI)...");
-    display_ = new EyeDisplay();
-    if (!display_->Initialize()) {
-        ESP_LOGE(TAG, "Display initialization failed");
-        delete display_;
-        display_ = nullptr;
-    }
+
+    // ---- Step 1: Backlight LEDC PWM (matches 06-lcd bsp_display_brightness_init) ----
+    const ledc_timer_config_t bl_timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_10_BIT,
+        .timer_num = LEDC_TIMER_1,
+        .freq_hz = 5000,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&bl_timer));
+
+    const ledc_channel_config_t bl_channel = {
+        .gpio_num = GPIO_NUM_42,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_1,
+        .duty = 0,
+        .hpoint = 0,
+        .flags = { .output_invert = true }
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&bl_channel));
+
+    // ---- Step 2: SPI bus init (matches 06-lcd bsp_display_new) ----
+    const spi_bus_config_t buscfg = {
+        .mosi_io_num = GPIO_NUM_40,
+        .miso_io_num = GPIO_NUM_NC,
+        .sclk_io_num = GPIO_NUM_41,
+        .quadwp_io_num = GPIO_NUM_NC,
+        .quadhd_io_num = GPIO_NUM_NC,
+        .max_transfer_sz = 320 * 240 * sizeof(uint16_t),
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
+    // ---- Step 3: Panel IO init (matches 06-lcd, field order per ESP-IDF 5.5.1) ----
+    const esp_lcd_panel_io_spi_config_t io_config = {
+        .cs_gpio_num = GPIO_NUM_NC,
+        .dc_gpio_num = GPIO_NUM_39,
+        .spi_mode = 2,
+        .pclk_hz = 80 * 1000 * 1000,
+        .trans_queue_depth = 10,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &lcd_io_));
+
+    // ---- Step 4: ST7789 driver init (matches 06-lcd) ----
+    const esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = GPIO_NUM_NC,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .bits_per_pixel = 16,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(lcd_io_, &panel_config, &lcd_panel_));
+
+    // ---- Step 5: Reset, then CS LOW, then init (EXACT 06-lcd order) ----
+    esp_lcd_panel_reset(lcd_panel_);
+    pca9557_->SetOutputState(0, 0);   // CS LOW (bit 0 = 0)
+    esp_lcd_panel_init(lcd_panel_);
+    esp_lcd_panel_invert_color(lcd_panel_, true);
+    esp_lcd_panel_swap_xy(lcd_panel_, true);
+    esp_lcd_panel_mirror(lcd_panel_, true, false);
+
+    // ---- Step 6: Turn on display and backlight (matches 06-lcd bsp_lcd_init) ----
+    esp_lcd_panel_disp_on_off(lcd_panel_, true);
+    // Backlight ON: duty=1023, output_invert=true → GPIO LOW → backlight ON
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+
+    ESP_LOGI(TAG, "Display initialized (06-lcd compatible mode)");
 }

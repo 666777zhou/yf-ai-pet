@@ -37,10 +37,18 @@ dependencies:
     source:
       type: idf
     version: 5.5.1
+  lvgl/lvgl:
+    component_hash: 096c69af22eaf8a2b721e3913da91918c5e6bf1a762a113ec01f401aa61337a0
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 9.2.2
 direct_dependencies:
 - 78/esp-opus-encoder
 - espressif/esp_websocket_client
 - idf
-manifest_hash: 8bd8c70391ba5a070d26025d4d570256a10f5a0d6bc06b1c2894872ee74f70e1
+- lvgl/lvgl
+manifest_hash: 55756685ae6910a356e9f4f436f44da15f9d32607313130c9fe18d05054fc243
 target: esp32s3
 version: 2.0.0

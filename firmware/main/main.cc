@@ -1,6 +1,7 @@
 #include <esp_log.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
+#include <esp_lcd_panel_ops.h>
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -12,6 +13,7 @@
 #include "wifi_manager.h"
 #include "cat_websocket.h"
 #include "audio_pipeline.h"
+#include "lvgl_display.h"
 
 #define TAG "main"
 
@@ -21,9 +23,9 @@ static AudioDecoder g_audio_decoder;
 static volatile bool g_audio_playing = false;
 static volatile int64_t g_last_audio_ms = 0;
 
-// TODO: Display deferred render — disabled until display driver is verified.
-// static volatile bool g_display_needs_render = false;
-// static std::string g_display_emotion = "content";
+// Display deferred render state
+static volatile bool g_display_needs_render = false;
+static std::string g_display_emotion = "content";
 
 // Stream buffer for PCM frames: main loop → encoder task.
 // 40 frames × 1920 bytes gives ~2.4s of buffering headroom.
@@ -94,11 +96,21 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize board (I2C, audio, GPIO)
+    // Initialize board (I2C, audio, GPIO, display)
     auto& board = AiCatBoard::GetInstance();
     if (!board.Initialize()) {
         ESP_LOGE(TAG, "Board initialization failed");
         return;
+    }
+
+    // Initialize LVGL eye display (uses panel from AiCatBoard)
+    auto& eye_display = LvglEyeDisplay::GetInstance();
+    if (eye_display.Initialize(board.GetLcdPanel())) {
+        // Show default NORMAL eyes immediately
+        LvglEyeDisplay::RunLvgl();
+        ESP_LOGI(TAG, "LVGL eye display ready — waiting for server commands");
+    } else {
+        ESP_LOGE(TAG, "LVGL eye display init failed — continuing without eyes");
     }
 
     // Connect WiFi
@@ -118,7 +130,13 @@ extern "C" void app_main(void) {
                 ESP_LOGI(TAG, "Command: emotion=%s ears=(%d,%d) vib=%d audio=%d",
                          cmd.emotion.c_str(), cmd.ear_left_deg, cmd.ear_right_deg,
                          cmd.vibration, cmd.has_audio);
-                // TODO: update display, execute servo/vibration actions
+
+                // Update display emotion — set immediately
+                if (!cmd.emotion.empty()) {
+                    g_display_emotion = cmd.emotion;
+                    g_display_needs_render = true;
+                }
+                // TODO: servo/vibration actions
             });
 
             // Set up audio handler: decode Opus → PCM → play through speaker
@@ -229,7 +247,12 @@ extern "C" void app_main(void) {
         // Process incoming WebSocket messages
         g_websocket.ProcessIncoming(50);
 
-        // TODO: Deferred display render — disabled until display driver is verified
+        // Deferred display render — update kawaii_face emotion
+        if (g_display_needs_render) {
+            auto& eye_disp = LvglEyeDisplay::GetInstance();
+            eye_disp.SetEmotion(g_display_emotion);
+            g_display_needs_render = false;
+        }
 
         // Log disconnection events
         static bool was_connected = false;
@@ -247,6 +270,9 @@ extern "C" void app_main(void) {
                 was_connected = true;
             }
         }
+
+        // Drive LVGL timers and rendering
+        LvglEyeDisplay::RunLvgl();
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }

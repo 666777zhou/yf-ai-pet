@@ -3,6 +3,7 @@
 #include <esp_heap_caps.h>
 #include <driver/spi_common.h>
 #include <driver/gpio.h>
+#include <driver/ledc.h>
 #include <cmath>
 #include <algorithm>
 
@@ -34,15 +35,29 @@ EyeDisplay::~EyeDisplay() {
 }
 
 bool EyeDisplay::Initialize() {
-    // ---- Backlight ----
-    gpio_config_t bl_cfg = {};
-    bl_cfg.pin_bit_mask = 1ULL << DISPLAY_BL_PIN;
-    bl_cfg.mode = GPIO_MODE_OUTPUT;
-    bl_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
-    bl_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    gpio_config(&bl_cfg);
-    // Backlight inverted: 0 = on, 1 = off
-    gpio_set_level((gpio_num_t)DISPLAY_BL_PIN, 0);  // off during init
+    // ---- Backlight (LEDC PWM) ----
+    {
+        const ledc_timer_config_t bl_timer = {
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .duty_resolution = LEDC_TIMER_10_BIT,
+            .timer_num = LEDC_TIMER_1,
+            .freq_hz = 5000,
+            .clk_cfg = LEDC_AUTO_CLK
+        };
+        ESP_ERROR_CHECK(ledc_timer_config(&bl_timer));
+
+        const ledc_channel_config_t bl_channel = {
+            .gpio_num = DISPLAY_BL_PIN,
+            .speed_mode = LEDC_LOW_SPEED_MODE,
+            .channel = LEDC_CHANNEL_0,
+            .intr_type = LEDC_INTR_DISABLE,
+            .timer_sel = LEDC_TIMER_1,
+            .duty = 0,
+            .hpoint = 0,
+            .flags = { .output_invert = true }
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&bl_channel));
+    }
 
     // ---- SPI bus ----
     spi_bus_config_t buscfg = {};
@@ -99,8 +114,13 @@ bool EyeDisplay::Initialize() {
 }
 
 void EyeDisplay::SetBacklight(bool on) {
-    // Inverted: 0 = on, 1 = off
-    gpio_set_level((gpio_num_t)DISPLAY_BL_PIN, on ? 0 : 1);
+    // LEDC PWM with output_invert=true:
+    //   duty=1023 → inverted output=LOW → backlight circuit active-low → ON
+    //   duty=0    → inverted output=HIGH → backlight OFF
+    // Brightness: 1023 = 100%, 0 = 0%
+    uint32_t duty = on ? 1023 : 0;
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
 }
 
 // ---- Drawing primitives ----
@@ -172,9 +192,28 @@ void EyeDisplay::Clear(uint16_t color) {
 }
 
 void EyeDisplay::Flush() {
-    esp_lcd_panel_draw_bitmap(panel_, 0, 0,
-                              DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                              fb_);
+    esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_, 0, 0,
+                                              DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                                              fb_);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Draw bitmap failed: %d (0x%x)", ret, ret);
+    }
+}
+
+void EyeDisplay::DrawBitmap(int x_start, int y_start, int x_end, int y_end,
+                            const uint16_t* data) {
+    int w = x_end - x_start;
+    int h = y_end - y_start;
+    size_t bytes = w * h * sizeof(uint16_t);
+    uint16_t* buf = (uint16_t*)heap_caps_malloc(bytes,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGE(TAG, "DrawBitmap: failed to alloc %zu bytes", bytes);
+        return;
+    }
+    memcpy(buf, data, bytes);
+    esp_lcd_panel_draw_bitmap(panel_, x_start, y_start, x_end, y_end, buf);
+    heap_caps_free(buf);
 }
 
 // ---- Emotion mapping ----
