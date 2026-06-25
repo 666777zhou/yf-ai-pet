@@ -23,6 +23,12 @@ server/tts_models/
 server/voices/ref_*.wav
 server/voices/ref_*.mp3
 
+# ESP-IDF auto-generated project config
+firmware/esp_idf_project_configuration.json
+
+# TLS certificates (sensitive)
+server/certs/
+
 # OS
 .DS_Store
 Thumbs.db
