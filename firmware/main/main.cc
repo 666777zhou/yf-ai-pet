@@ -2,6 +2,7 @@
 #include <esp_err.h>
 #include <esp_heap_caps.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_wifi.h>
 #include <nvs_flash.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -10,7 +11,7 @@
 #include <sys/time.h>
 
 #include "ai_cat_board.h"
-#include "wifi_manager.h"
+#include "wifi_provisioning.h"
 #include "cat_websocket.h"
 #include "audio_pipeline.h"
 #include "lvgl_display.h"
@@ -22,6 +23,14 @@ static AudioEncoder g_audio_encoder;
 static AudioDecoder g_audio_decoder;
 static volatile bool g_audio_playing = false;
 static volatile int64_t g_last_audio_ms = 0;
+
+// Audio output queue: decouple WebSocket callback (fast, non-blocking)
+// from I2S writes (can block when DMA buffer is full).
+// 30 frames × 60ms = 1.8s buffering — enough for typical TTS sentences.
+#define AUDIO_OUT_QUEUE_SIZE 30
+static QueueHandle_t g_audio_out_queue = nullptr;
+static StaticQueue_t g_audio_out_queue_struct;
+static uint8_t* g_audio_out_queue_storage = nullptr;
 
 // Display deferred render state
 static volatile bool g_display_needs_render = false;
@@ -84,6 +93,32 @@ static void EncoderTask(void* arg) {
     }
 }
 
+// Audio output task: dequeues PCM frames and writes to I2S.
+// Blocking I2S writes are fine here — this task has no other responsibilities.
+static void AudioOutputTask(void* arg) {
+    int16_t pcm_buf[AUDIO_FRAME_SAMPLES];
+    int played = 0;
+    while (true) {
+        if (g_audio_out_queue == nullptr) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        if (xQueueReceive(g_audio_out_queue, pcm_buf, pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;  // no audio yet — keep waiting
+        }
+        auto* codec = AiCatBoard::GetInstance().GetAudioCodec();
+        if (codec && codec->output_enabled()) {
+            std::vector<int16_t> pcm_vec(pcm_buf, pcm_buf + AUDIO_FRAME_SAMPLES);
+            codec->OutputData(pcm_vec);
+        }
+        played++;
+        if (played == 1) {
+            ESP_LOGI(TAG, "Audio output started");
+        }
+        g_last_audio_ms = GetTimestampMs();
+    }
+}
+
 // Main application entry point
 extern "C" void app_main(void) {
     ESP_LOGI(TAG, "=== AI Cat Firmware Starting ===");
@@ -113,55 +148,76 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "LVGL eye display init failed — continuing without eyes");
     }
 
-    // Connect WiFi
-    auto& wifi = WifiManager::GetInstance();
-    if (!wifi.Connect(WIFI_SSID, WIFI_PASSWORD)) {
-        ESP_LOGE(TAG, "WiFi connection failed — entering offline mode");
-        // TODO: enter offline cat behavior mode
-    }
+    // WiFi provisioning: try saved networks, fall back to captive portal
+    auto& wifi = WifiProvisioning::GetInstance();
+
+    // Show WiFi status on the display during scanning/connecting/provisioning
+    wifi.OnStatusChange([](const std::string& msg) {
+        auto& disp = LvglEyeDisplay::GetInstance();
+        size_t nl = msg.find('\n');
+        if (nl != std::string::npos) {
+            disp.ShowWifiInfo(msg.substr(0, nl), msg.substr(nl + 1));
+        } else {
+            disp.ShowWifiInfo(msg, "");
+        }
+    });
+
+    wifi.Start();  // blocks until connected (may reboot during provisioning)
+
+    // Disable WiFi power saving — prevents TCP write stalls that cause
+    // WebSocket disconnections (transport_poll_write timeout).
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    ESP_LOGI(TAG, "WiFi power save: OFF");
+
+    // Hide WiFi overlay — show cat eyes
+    eye_display.HideWifiInfo();
+
+    ESP_LOGI(TAG, "WiFi connected, IP: %s", wifi.GetIPAddress().c_str());
 
     // Connect WebSocket to server
-    if (wifi.IsConnected()) {
-        if (g_websocket.Connect(SERVER_WEBSOCKET_URL)) {
-            ESP_LOGI(TAG, "Connected to AI Cat server");
+    if (g_websocket.Connect(SERVER_WEBSOCKET_URL)) {
+        ESP_LOGI(TAG, "Connected to AI Cat server");
 
-            // Set up command handler
-            g_websocket.OnCommand([](const CommandPacket& cmd) {
-                ESP_LOGI(TAG, "Command: emotion=%s ears=(%d,%d) vib=%d audio=%d",
-                         cmd.emotion.c_str(), cmd.ear_left_deg, cmd.ear_right_deg,
-                         cmd.vibration, cmd.has_audio);
+        // Set up command handler
+        g_websocket.OnCommand([](const CommandPacket& cmd) {
+            ESP_LOGI(TAG, "Command: emotion=%s ears=(%d,%d) vib=%d audio=%d",
+                     cmd.emotion.c_str(), cmd.ear_left_deg, cmd.ear_right_deg,
+                     cmd.vibration, cmd.has_audio);
 
-                // Update display emotion — set immediately
-                if (!cmd.emotion.empty()) {
-                    g_display_emotion = cmd.emotion;
-                    g_display_needs_render = true;
+            // Update display emotion — set immediately
+            if (!cmd.emotion.empty()) {
+                g_display_emotion = cmd.emotion;
+                g_display_needs_render = true;
+            }
+            // TODO: servo/vibration actions
+        });
+
+        // Set up audio handler: decode Opus → enqueue PCM → audio output task plays it.
+        // This decouples WebSocket receive from blocking I2S writes.
+        g_websocket.OnAudio([](const std::vector<uint8_t>& opus_frame) {
+            static int cb_count = 0;
+            cb_count++;
+            g_audio_playing = true;
+
+            // Log only first frame to reduce serial spam during playback
+            if (cb_count == 1) {
+                ESP_LOGI(TAG, "AUDIO START: %d bytes", (int)opus_frame.size());
+            }
+
+            std::vector<int16_t> pcm(AUDIO_FRAME_SAMPLES);
+            if (g_audio_decoder.Decode(opus_frame, pcm)) {
+                // Block enqueue with timeout: waits for queue space (at most
+                // one frame duration = 60ms). This provides backpressure —
+                // if I2S is behind, the WS callback slows down to match
+                // real-time playback speed. No frames are dropped.
+                if (g_audio_out_queue) {
+                    xQueueSend(g_audio_out_queue, pcm.data(),
+                               pdMS_TO_TICKS(60));
                 }
-                // TODO: servo/vibration actions
-            });
-
-            // Set up audio handler: decode Opus → PCM → play through speaker
-            g_websocket.OnAudio([](const std::vector<uint8_t>& opus_frame) {
-                static int cb_count = 0;
-                cb_count++;
-                g_audio_playing = true;
-                g_last_audio_ms = GetTimestampMs();
-
-                // Log only first frame to reduce serial spam during playback
-                if (cb_count == 1) {
-                    ESP_LOGI(TAG, "AUDIO START: %d bytes", (int)opus_frame.size());
-                }
-
-                std::vector<int16_t> pcm(AUDIO_FRAME_SAMPLES);
-                if (g_audio_decoder.Decode(opus_frame, pcm)) {
-                    auto* codec = AiCatBoard::GetInstance().GetAudioCodec();
-                    if (codec && codec->output_enabled()) {
-                        codec->OutputData(pcm);
-                    }
-                }
-            });
-        } else {
-            ESP_LOGW(TAG, "WebSocket connection failed — offline mode");
-        }
+            }
+        });
+    } else {
+        ESP_LOGW(TAG, "WebSocket connection failed — offline mode");
     }
 
     // Set speaker volume
@@ -196,6 +252,30 @@ extern "C" void app_main(void) {
         xTaskCreate(EncoderTask, "encoder", 32768, nullptr, 5, nullptr);
     }
 
+    // Create audio output queue (PSRAM storage) and task — decouples
+    // WebSocket callback from blocking I2S writes to prevent audio stuttering.
+    {
+        size_t q_item_size = AUDIO_FRAME_SAMPLES * sizeof(int16_t);
+        size_t q_storage = AUDIO_OUT_QUEUE_SIZE * q_item_size;
+        g_audio_out_queue_storage = (uint8_t*)heap_caps_calloc(1, q_storage, MALLOC_CAP_SPIRAM);
+        if (g_audio_out_queue_storage) {
+            g_audio_out_queue = xQueueCreateStatic(
+                AUDIO_OUT_QUEUE_SIZE, q_item_size,
+                g_audio_out_queue_storage, &g_audio_out_queue_struct);
+        }
+        if (g_audio_out_queue) {
+            // Priority 8 = same as WS internal task.  Without this, the WS
+            // callback (pri 8) starves this task (pri 4) during audio bursts,
+            // the queue fills but nobody writes I2S → DMA underrun → stutter.
+            // Equal priority means round-robin scheduling in FreeRTOS.
+            xTaskCreate(AudioOutputTask, "audio_out", 4096, nullptr, 8, nullptr);
+            ESP_LOGI(TAG, "Audio output queue OK: %d frames (%d ms buffering) in PSRAM",
+                     AUDIO_OUT_QUEUE_SIZE, AUDIO_OUT_QUEUE_SIZE * 60);
+        } else {
+            ESP_LOGE(TAG, "Audio output queue creation FAILED (size=%u)", q_storage);
+        }
+    }
+
     // Main loop
     ESP_LOGI(TAG, "Entering main loop...");
     int64_t last_sensor_send = 0;
@@ -213,8 +293,8 @@ extern "C" void app_main(void) {
                      audio_sent_count, esp_get_free_heap_size());
         }
 
-        // Send sensor data at 10Hz (skip during audio playback to avoid lock contention)
-        if (now - last_sensor_send >= 100 && !g_audio_playing) {
+        // Send sensor data at 2Hz (every 500ms) — skip during audio playback
+        if (now - last_sensor_send >= 500 && !g_audio_playing) {
             SensorPacket sensor = {};
             sensor.ts = now;
             ReadTouchSensors(sensor.touch_head, sensor.touch_back, sensor.touch_belly);
@@ -262,13 +342,32 @@ extern "C" void app_main(void) {
         }
         was_connected = is_connected;
 
-        // Reconnection — but don't block! Just try once
-        if (!is_connected && wifi.IsConnected()) {
+        // Reconnection — with 5s cooldown to avoid flooding
+        static int64_t last_reconnect_attempt = 0;
+        if (!is_connected && wifi.IsConnected() && (now - last_reconnect_attempt > 5000)) {
+            last_reconnect_attempt = now;
             ESP_LOGI(TAG, "Attempting reconnection...");
             if (g_websocket.Connect(SERVER_WEBSOCKET_URL)) {
                 ESP_LOGI(TAG, "Reconnected successfully");
                 was_connected = true;
             }
+        }
+
+        // BOOT button long-press (3s) → reset WiFi and reboot into provisioning
+        // Uses elapsed time (not counter) so it survives blocking calls like WebSocket Connect
+        static int64_t boot_press_start = 0;
+        bool boot_pressed = (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
+        if (boot_pressed && boot_press_start == 0) {
+            boot_press_start = now;  // press started
+        } else if (boot_pressed && (now - boot_press_start > 3000)) {
+            ESP_LOGI(TAG, "BOOT button held 3s — resetting WiFi");
+            auto& eye_disp = LvglEyeDisplay::GetInstance();
+            eye_disp.ShowWifiInfo("Resetting WiFi...", "Restarting in AP mode");
+            LvglEyeDisplay::RunLvgl();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            WifiProvisioning::GetInstance().ResetToProvisioning();
+        } else if (!boot_pressed) {
+            boot_press_start = 0;  // released
         }
 
         // Drive LVGL timers and rendering

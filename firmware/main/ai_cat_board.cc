@@ -143,7 +143,7 @@ void AiCatBoard::InitializeDisplay() {
         .dc_gpio_num = GPIO_NUM_39,
         .spi_mode = 2,
         .pclk_hz = 80 * 1000 * 1000,
-        .trans_queue_depth = 10,
+        .trans_queue_depth = 50,  // deep queue for LVGL partial-render bursts
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
     };

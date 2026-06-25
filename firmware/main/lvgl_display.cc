@@ -86,6 +86,23 @@ bool LvglEyeDisplay::Initialize(esp_lcd_panel_handle_t panel) {
         return false;
     }
 
+    // ---- WiFi provisioning overlay labels (hidden by default) ----
+    // Title label at top
+    wifi_label_ssid_ = lv_label_create(scr);
+    lv_obj_set_style_text_color(wifi_label_ssid_, lv_color_white(), 0);
+    lv_obj_set_style_text_font(wifi_label_ssid_, &lv_font_montserrat_14, 0);
+    lv_label_set_text(wifi_label_ssid_, "");
+    lv_obj_align(wifi_label_ssid_, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_add_flag(wifi_label_ssid_, LV_OBJ_FLAG_HIDDEN);
+
+    // URL label at bottom
+    wifi_label_url_ = lv_label_create(scr);
+    lv_obj_set_style_text_color(wifi_label_url_, lv_color_hex(0x00FF88), 0);
+    lv_obj_set_style_text_font(wifi_label_url_, &lv_font_montserrat_14, 0);
+    lv_label_set_text(wifi_label_url_, "");
+    lv_obj_align(wifi_label_url_, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_add_flag(wifi_label_url_, LV_OBJ_FLAG_HIDDEN);
+
     // ---- 1ms tick timer ----
     const esp_timer_create_args_t tick_args = {
         .callback = TickCallback,
@@ -130,11 +147,30 @@ void LvglEyeDisplay::SetEmotion(const std::string& emotion) {
     ESP_LOGI(TAG, "Emotion: %s → face_%d", emotion.c_str(), (int)fe);
 }
 
+// ---- WiFi provisioning overlay ----
+
+void LvglEyeDisplay::ShowWifiInfo(const std::string& ssid, const std::string& url) {
+    if (!initialized_) return;
+    lv_label_set_text(wifi_label_ssid_, ssid.c_str());
+    lv_obj_remove_flag(wifi_label_ssid_, LV_OBJ_FLAG_HIDDEN);
+    if (!url.empty()) {
+        lv_label_set_text(wifi_label_url_, url.c_str());
+        lv_obj_remove_flag(wifi_label_url_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void LvglEyeDisplay::HideWifiInfo() {
+    if (!initialized_) return;
+    lv_obj_add_flag(wifi_label_ssid_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(wifi_label_url_, LV_OBJ_FLAG_HIDDEN);
+}
+
 // ---- LVGL 9 callbacks ----
 
 void LvglEyeDisplay::FlushCallback(lv_display_t *disp, const lv_area_t *area,
                                     uint8_t *px_map) {
     auto& self = GetInstance();
+    // Blocking call — waits for SPI DMA to finish before returning
     esp_err_t ret = esp_lcd_panel_draw_bitmap(
         self.panel_,
         area->x1, area->y1,

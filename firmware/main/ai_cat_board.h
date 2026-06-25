@@ -53,9 +53,10 @@
 #define BOOT_BUTTON_GPIO    GPIO_NUM_0
 
 // WebSocket server config
-#define SERVER_WEBSOCKET_URL  "ws://yfcat.x3322.net:8765/ws"
-#define WIFI_SSID             "503"
-#define WIFI_PASSWORD         "13306716600"
+// Cloudflare Tunnel — permanent named tunnel (cat.yfcat.fun → localhost:8081)
+#define SERVER_WEBSOCKET_URL  "wss://cat.yfcat.fun/ws"
+// WiFi credentials are provisioned via SoftAP captive portal (78/esp-wifi-connect).
+// No hardcoded SSID/password — use phone browser to configure on first boot.
 
 class AiCatBoard {
 public:
@@ -67,6 +68,7 @@ public:
     i2c_master_bus_handle_t GetI2cBus() { return i2c_bus_; }
     EyeDisplay* GetDisplay() { return display_; }
     esp_lcd_panel_handle_t GetLcdPanel() { return lcd_panel_; }
+    esp_lcd_panel_io_handle_t GetLcdIo() { return lcd_io_; }
 
 private:
     AiCatBoard() = default;

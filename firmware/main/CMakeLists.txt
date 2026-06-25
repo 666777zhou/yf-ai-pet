@@ -3,7 +3,7 @@ idf_component_register(
         main.cc
         ai_cat_board.cc
         cat_websocket.cc
-        wifi_manager.cc
+        wifi_provisioning.cc
         i2c_device.cc
         pca9557.cc
         audio_codec.cc
@@ -22,6 +22,7 @@ idf_component_register(
         esp_netif
         esp_wifi
         esp_websocket_client
+        mbedtls
         freertos
         json
         nvs_flash

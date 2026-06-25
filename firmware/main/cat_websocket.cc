@@ -2,26 +2,17 @@
 
 #include <esp_log.h>
 #include <esp_websocket_client.h>
+#include <esp_crt_bundle.h>
 #include <esp_event.h>
 #include <cJSON.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #define TAG "CatWebSocket"
 
-// Event group bits
-#define WS_CONNECTED_BIT BIT0
-#define WS_DATA_READY_BIT BIT1
-
 // Global pointer for event handler (simplified: single instance)
 static CatWebSocket* g_ws_instance = nullptr;
-
-// Message types for internal queue
-struct WsMessage {
-    bool is_binary;
-    std::vector<uint8_t> data;
-};
 
 void WsEventHandler(void* handler_args, esp_event_base_t base,
                             int32_t event_id, void* event_data) {
@@ -45,7 +36,6 @@ void WsEventHandler(void* handler_args, esp_event_base_t base,
             if (data->op_code == 0x01) {
                 // Text frame: JSON command
                 ESP_LOGI(TAG, "WS recv#%d: TEXT %d bytes", data_count, data->data_len);
-                std::string json((const char*)data->data_ptr, data->data_len);
                 CommandPacket cmd = {};
 
                 cJSON* root = cJSON_ParseWithLength(data->data_ptr, data->data_len);
@@ -96,20 +86,43 @@ void WsEventHandler(void* handler_args, esp_event_base_t base,
 
 CatWebSocket::CatWebSocket()
     : ws_handle_(nullptr)
-    , connected_(false) {
+    , connected_(false)
+    , send_mutex_(nullptr)
+    , send_signal_(nullptr)
+    , sender_task_(nullptr)
+    , sender_stop_(false) {
     g_ws_instance = this;
 }
 
 CatWebSocket::~CatWebSocket() {
+    sender_stop_ = true;
+    if (send_signal_) {
+        xSemaphoreGive(send_signal_);  // wake sender task so it can exit
+    }
+    // Give sender task time to exit
+    vTaskDelay(pdMS_TO_TICKS(200));
     Disconnect();
+    if (send_mutex_) {
+        vSemaphoreDelete(send_mutex_);
+    }
+    if (send_signal_) {
+        vSemaphoreDelete(send_signal_);
+    }
     g_ws_instance = nullptr;
 }
 
 bool CatWebSocket::Connect(const std::string& url) {
+    // Clean up any previous connection before starting a new one
+    Disconnect();
+
     esp_websocket_client_config_t ws_cfg = {};
     ws_cfg.uri = url.c_str();
-    ws_cfg.disable_auto_reconnect = false;
-    ws_cfg.reconnect_timeout_ms = 5000;
+    // Use ESP-IDF built-in Mozilla CA bundle for TLS verification
+    if (url.find("wss://") == 0) {
+        ws_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+    ws_cfg.disable_auto_reconnect = true;
+    ws_cfg.reconnect_timeout_ms = 0;
     ws_cfg.network_timeout_ms = 10000;
     // WebSocket keepalive: send ping every 10s, wait 30s for pong
     ws_cfg.ping_interval_sec = 10;
@@ -120,9 +133,9 @@ bool CatWebSocket::Connect(const std::string& url) {
     ws_cfg.keep_alive_idle = 5;
     ws_cfg.keep_alive_interval = 5;
     ws_cfg.keep_alive_count = 3;
-    // Receive buffer: 4KB default may be too small for TTS audio frames
+    // Receive buffer
     ws_cfg.buffer_size = 16384;
-    // Internal task: priority 8, stack 16KB (Opus decode + I2S write need headroom)
+    // Internal task
     ws_cfg.task_prio = 8;
     ws_cfg.task_stack = 16384;
 
@@ -142,15 +155,15 @@ bool CatWebSocket::Connect(const std::string& url) {
         return false;
     }
 
-    // Wait for connection (max 10 seconds)
+    // Wait for connection (max 10s: 100 retries × 100ms)
     int retries = 0;
-    while (!esp_websocket_client_is_connected(client) && retries < 50) {
-        vTaskDelay(pdMS_TO_TICKS(200));
+    while (!esp_websocket_client_is_connected(client) && retries < 100) {
+        vTaskDelay(pdMS_TO_TICKS(100));
         retries++;
     }
 
     if (!esp_websocket_client_is_connected(client)) {
-        ESP_LOGE(TAG, "WebSocket connection timeout");
+        ESP_LOGW(TAG, "WebSocket connection timeout after 10s");
         esp_websocket_client_stop(client);
         esp_websocket_client_destroy(client);
         return false;
@@ -158,11 +171,34 @@ bool CatWebSocket::Connect(const std::string& url) {
 
     ws_handle_ = client;
     connected_ = true;
+
+    // Create sender queue synchronization primitives
+    if (!send_mutex_) {
+        send_mutex_ = xSemaphoreCreateMutex();
+    }
+    if (!send_signal_) {
+        send_signal_ = xSemaphoreCreateBinary();
+    }
+
+    // Start dedicated sender task (priority 3: below ws internal task at 8,
+    // above main loop at 1, so it doesn't starve the main loop)
+    sender_stop_ = false;
+    if (xTaskCreate(SenderTaskFn, "ws_sender", 4096, this, 3, &sender_task_) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create sender task");
+    }
+
     ESP_LOGI(TAG, "WebSocket connected to %s", url.c_str());
     return true;
 }
 
 void CatWebSocket::Disconnect() {
+    sender_stop_ = true;
+    if (send_signal_) {
+        xSemaphoreGive(send_signal_);  // wake sender task
+    }
+    // Wait briefly for sender task to drain
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     if (ws_handle_) {
         auto client = static_cast<esp_websocket_client_handle_t>(ws_handle_);
         esp_websocket_client_stop(client);
@@ -170,6 +206,15 @@ void CatWebSocket::Disconnect() {
         ws_handle_ = nullptr;
     }
     connected_ = false;
+
+    // Drain any pending items in the send queue (they're stale)
+    if (send_mutex_) {
+        xSemaphoreTake(send_mutex_, portMAX_DELAY);
+        while (!send_queue_.empty()) {
+            send_queue_.pop();
+        }
+        xSemaphoreGive(send_mutex_);
+    }
 }
 
 bool CatWebSocket::IsConnected() {
@@ -180,9 +225,80 @@ bool CatWebSocket::IsConnected() {
     return connected_;
 }
 
+// ---- Sender task ----
+
+void CatWebSocket::SenderTaskFn(void* arg) {
+    auto* self = static_cast<CatWebSocket*>(arg);
+    self->SenderLoop();
+    vTaskDelete(nullptr);
+}
+
+void CatWebSocket::SenderLoop() {
+    while (!sender_stop_) {
+        // Wait for a signal that data is available (with 1s timeout so we can
+        // check the stop flag periodically)
+        if (xSemaphoreTake(send_signal_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            continue;  // timeout — loop back to check stop flag
+        }
+
+        // Pop all available items from the queue
+        while (!sender_stop_) {
+            SendItem item;
+            bool has_item = false;
+
+            xSemaphoreTake(send_mutex_, portMAX_DELAY);
+            if (!send_queue_.empty()) {
+                item = std::move(send_queue_.front());
+                send_queue_.pop();
+                has_item = true;
+            }
+            xSemaphoreGive(send_mutex_);
+
+            if (!has_item) break;  // queue drained
+
+            if (!ws_handle_ || !connected_) {
+                continue;  // connection gone, drop this item
+            }
+
+            auto client = static_cast<esp_websocket_client_handle_t>(ws_handle_);
+
+            // Use portMAX_DELAY: block until socket is writable.
+            // If the connection is dead, the internal ping/pong mechanism
+            // will eventually abort it (pingpong_timeout_sec=30s), which
+            // closes the transport and unblocks this call.
+            int ret;
+            if (item.is_binary) {
+                ret = esp_websocket_client_send_bin(
+                    client, (const char*)item.data.data(),
+                    item.data.size(), portMAX_DELAY);
+            } else {
+                ret = esp_websocket_client_send_text(
+                    client, (const char*)item.data.data(),
+                    item.data.size(), portMAX_DELAY);
+            }
+
+            if (ret <= 0) {
+                // Send failed — connection is dead or dying.
+                // Don't flood logs; the event handler will handle cleanup.
+                static int fail_count = 0;
+                fail_count++;
+                if (fail_count <= 3 || fail_count % 20 == 0) {
+                    ESP_LOGW(TAG, "Sender: send failed (count=%d, ret=%d)", fail_count, ret);
+                }
+                // Drain remaining items on failure — they're all going to fail
+                xSemaphoreTake(send_mutex_, portMAX_DELAY);
+                while (!send_queue_.empty()) send_queue_.pop();
+                xSemaphoreGive(send_mutex_);
+                break;  // stop trying until next signal
+            }
+        }
+    }
+}
+
+// ---- Enqueue helpers (non-blocking, safe to call from any task) ----
+
 void CatWebSocket::SendSensorData(const SensorPacket& sensor) {
-    if (!IsConnected()) return;
-    auto client = static_cast<esp_websocket_client_handle_t>(ws_handle_);
+    if (!ws_handle_ || !connected_ || sender_stop_) return;
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "sensors");
@@ -193,17 +309,36 @@ void CatWebSocket::SendSensorData(const SensorPacket& sensor) {
     cJSON_AddNumberToObject(root, "battery_pct", sensor.battery_pct);
 
     char* str = cJSON_PrintUnformatted(root);
-    esp_websocket_client_send_text(client, str, strlen(str), pdMS_TO_TICKS(500));
+    size_t len = strlen(str);
+
+    SendItem item;
+    item.is_binary = false;
+    item.data.assign(reinterpret_cast<uint8_t*>(str),
+                     reinterpret_cast<uint8_t*>(str) + len);
+
     cJSON_free(str);
     cJSON_Delete(root);
+
+    xSemaphoreTake(send_mutex_, portMAX_DELAY);
+    send_queue_.push(std::move(item));
+    xSemaphoreGive(send_mutex_);
+    xSemaphoreGive(send_signal_);  // wake sender task
 }
 
 void CatWebSocket::SendAudio(const std::vector<uint8_t>& opus_frame) {
-    if (!IsConnected()) return;
-    auto client = static_cast<esp_websocket_client_handle_t>(ws_handle_);
-    esp_websocket_client_send_bin(client, (const char*)opus_frame.data(),
-                                   opus_frame.size(), pdMS_TO_TICKS(500));
+    if (!ws_handle_ || !connected_ || sender_stop_) return;
+
+    SendItem item;
+    item.is_binary = true;
+    item.data = opus_frame;  // copy
+
+    xSemaphoreTake(send_mutex_, portMAX_DELAY);
+    send_queue_.push(std::move(item));
+    xSemaphoreGive(send_mutex_);
+    xSemaphoreGive(send_signal_);  // wake sender task
 }
+
+// ---- Callbacks ----
 
 void CatWebSocket::OnCommand(CommandCallback cb) {
     command_cb_ = std::move(cb);
@@ -214,8 +349,8 @@ void CatWebSocket::OnAudio(AudioCallback cb) {
 }
 
 void CatWebSocket::ProcessIncoming(int timeout_ms) {
-    // Event callbacks handle all incoming data
-    // This function just checks connection status
+    // Event callbacks handle all incoming data via the internal websocket task.
+    // This function just checks connection status periodically.
     if (ws_handle_) {
         auto client = static_cast<esp_websocket_client_handle_t>(ws_handle_);
         connected_ = esp_websocket_client_is_connected(client);

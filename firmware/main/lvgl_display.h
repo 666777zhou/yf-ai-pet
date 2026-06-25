@@ -31,6 +31,12 @@ public:
     /// Set emotion from server command string.
     void SetEmotion(const std::string& emotion);
 
+    /// Show WiFi provisioning info overlay on screen.
+    void ShowWifiInfo(const std::string& ssid, const std::string& url);
+
+    /// Hide WiFi provisioning overlay.
+    void HideWifiInfo();
+
     /// Drive LVGL timer handler — call from main loop periodically.
     static void RunLvgl();
 
@@ -50,6 +56,8 @@ private:
     lv_color_t     *draw_buf_1_ = nullptr;
     lv_color_t     *draw_buf_2_ = nullptr;
     esp_timer_handle_t tick_timer_ = nullptr;
+    lv_obj_t *wifi_label_ssid_ = nullptr;
+    lv_obj_t *wifi_label_url_  = nullptr;
     bool initialized_ = false;
 };
 

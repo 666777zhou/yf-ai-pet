@@ -23,6 +23,16 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.4.1
+  78/esp-wifi-connect:
+    component_hash: 752e62d469a341495368b6a3f812afdbe37569ea5b4460f4eedec42253118e8c
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.5.2
   espressif/esp_websocket_client:
     component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
     dependencies:
@@ -46,9 +56,10 @@ dependencies:
     version: 9.2.2
 direct_dependencies:
 - 78/esp-opus-encoder
+- 78/esp-wifi-connect
 - espressif/esp_websocket_client
 - idf
 - lvgl/lvgl
-manifest_hash: 55756685ae6910a356e9f4f436f44da15f9d32607313130c9fe18d05054fc243
+manifest_hash: 982529017ef0d7099d732cd82e0eaa0de247bfd67526fb74c809d96969094d21
 target: esp32s3
 version: 2.0.0
