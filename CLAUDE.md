@@ -13,15 +13,22 @@
 │  · MEMS 麦克风 + 扬声器                          │
 │  · 震动马达（呼噜模拟）                           │
 │  · 电池 18650×2 + USB-C 充电                    │
-│       │ WiFi / WebSocket                        │
+│       │ WiFi / WSS (WebSocket over TLS)         │
+│       ▼                                         │
+│  Cloudflare Tunnel (cloudflared systemd 服务)    │
+│  · TLS 终止 + 反向代理                           │
+│  · 无需公网 IP/端口转发/DMZ                       │
+│       │ QUIC outbound → CF Edge                 │
 │       ▼                                         │
 │  3090 服务器（Python asyncio）                    │
-│  · STT: Faster-Whisper (CUDA)                   │
-│  · LLM: 猫人格引擎（Qwen/Llama 本地推理）          │
-│  · TTS: Edge-TTS / 本地 TTS                     │
+│  · STT: Faster-Whisper large-v3 (CUDA)          │
+│  · LLM: Qwen3-14B via Ollama (本地)              │
+│  · TTS: Qwen3-TTS (声音克隆) / Fish-Speech / Piper │
 │  · 情绪状态机：content/sleepy/playful/annoyed/…  │
 └─────────────────────────────────────────────────┘
 ```
+
+**详细网络文档：** `docs/network-architecture.md`
 
 ## 目录结构
 
@@ -51,9 +58,12 @@ yf-ai-pet/
 │   ├── tts_engine.py            # TTS：Edge-TTS（v1），预留本地 TTS
 │   ├── audio_utils.py           # Opus 编解码、VAD（能量检测）、PCM 工具
 │   └── requirements.txt         # websockets, faster-whisper, edge-tts, opuslib, numpy
-└── docs/                  # 产品方案文档
-    ├── quick-mvp-design.md      # 快速 MVP 方案（1 周跑通链路）
-    └── product-strategy-design.md # 完整产品策略
+└── docs/                  # 产品方案 + 技术文档
+    ├── data-flow-architecture.md # 数据流与系统架构（详细）
+    ├── network-architecture.md   # 网络链路（域名/Tunnel/DNS/运维）
+    ├── quick-mvp-design.md       # 快速 MVP 方案（1 周跑通链路）
+    ├── product-strategy-design.md # 完整产品策略
+    └── embedded-learning-path.md # 嵌入式学习路线
 ```
 
 ## 硬件平台
@@ -73,7 +83,9 @@ yf-ai-pet/
 
 ## 通信协议（ESP32 ↔ 服务器）
 
-WebSocket 长连接，JSON + 二进制混合：
+WebSocket 长连接 over Cloudflare Tunnel，JSON + 二进制混合。
+
+**连接地址：** `wss://cat.yfcat.fun/ws`（永久域名，Cloudflare TLS 终止 → Tunnel → `localhost:8081`）
 
 **ESP32 → 服务器：**
 ```json
@@ -113,10 +125,25 @@ idf.py -p /dev/ttyUSB0 flash monitor  # 烧录 + 串口监视
 ```bash
 cd /home/zyf/Code/yf-ai-pet/server
 pip install -r requirements.txt
-python main.py  # 监听 0.0.0.0:8080
+conda activate ai-cat
+python main.py  # WS: 0.0.0.0:8081/ws, WSS: 0.0.0.0:8080/ws (预留)
 ```
 
-**LLM 接入：** 当前使用 DeepSeek API（`deepseek-chat`），计划迁移到本地 Ollama + Qwen3-14B。
+**LLM 接入：** 本地 Ollama + Qwen3-14B（`http://127.0.0.1:11434/api/chat`）。
+
+## 网络链路管理
+
+```bash
+# Cloudflare Tunnel 服务
+systemctl --user status cloudflared        # 查看状态
+systemctl --user restart cloudflared       # 重启（改了 config.yml 后）
+journalctl --user -u cloudflared -f        # 实时日志
+
+# DNS 诊断
+dig @1.1.1.1 cat.yfcat.fun A              # 应返回 CF 边缘 IP
+```
+
+**详细网络文档：** `docs/network-architecture.md`
 
 ## 开发状态
 
@@ -130,7 +157,7 @@ python main.py  # 监听 0.0.0.0:8080
 | 服务器 WebSocket | ✅ 基本完成 | JSON 命令 + Opus 音频 + VAD + 情绪状态机 |
 | STT | ✅ 基本完成 | Faster-Whisper large-v3 on CUDA |
 | TTS | ✅ 多引擎 | Qwen3-TTS(默认,声音克隆) + Fish-Speech + Piper + GPT-SoVITS |
-| LLM 集成 | ⚠️ DeepSeek API | 待迁移到本地 Ollama + Qwen3-14B |
+| LLM 集成 | ✅ 本地 Ollama | Qwen3-14B @ 127.0.0.1:11434 |
 | 硬件焊接 | 🔲 未开始 | 元件清单见 docs/quick-mvp-design.md |
 
 ## TTS 引擎对比

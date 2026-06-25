@@ -37,6 +37,7 @@ class STTEngine:
             device=device,
             compute_type=compute_type,
             num_workers=2,
+            local_files_only=True,  # skip HuggingFace network check (model must be cached)
         )
         print("Whisper model loaded.")
 

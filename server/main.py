@@ -28,6 +28,7 @@ for _path in sorted(glob.glob(_cublas_pat), reverse=True):
 
 import asyncio
 import logging
+import ssl
 import sys
 
 from websockets.asyncio.server import serve
@@ -46,7 +47,11 @@ logger = logging.getLogger("ai-cat-server")
 
 # Configuration
 HOST = "0.0.0.0"
-PORT = 8080
+PORT = 8081          # plain WS (LAN debug)
+WSS_PORT = 8080      # WSS (TLS-encrypted, WAN via router DMZ — ISP only opens 80/8080)
+CERT_DIR = os.path.join(os.path.dirname(__file__), "certs")
+CERT_FILE = os.path.join(CERT_DIR, "cert.pem")
+KEY_FILE = os.path.join(CERT_DIR, "key.pem")
 WHISPER_MODEL = "large-v3"  # "tiny", "small", "medium", "large-v2", "large-v3"
 
 # LLM provider: "ollama" (default) or "deepseek"
@@ -341,8 +346,9 @@ class AICatServer:
             print("Available: list | use <id> | add <name> <ref.wav> | delete <id>")
 
     async def start(self):
-        """Start the WebSocket server."""
-        logger.info(f"AI Cat Server starting on {HOST}:{PORT}")
+        """Start the WebSocket server (WS + WSS)."""
+        logger.info(f"AI Cat Server starting:")
+        logger.info(f"  WS  (LAN): ws://{HOST}:{PORT}/ws")
         logger.info(f"STT: Faster-Whisper {WHISPER_MODEL} on CUDA")
         logger.info(f"TTS: {self.voices.get_active().name} ({self.voices.get_active().engine})"
                      f"{' + voice cloning' if self.voices.get_active().ref_audio else ''}")
@@ -354,9 +360,34 @@ class AICatServer:
 
         console_task = asyncio.create_task(self._console_reader())
 
-        async with serve(self.handle_connection, HOST, PORT):
-            logger.info(f"Server ready — waiting for AI Cat connections...")
-            await asyncio.get_running_loop().create_future()  # run forever
+        # Set up SSL for WSS
+        ssl_context = None
+        if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(CERT_FILE, KEY_FILE)
+            logger.info(f"  WSS (WAN): wss://cat.yfcat.fun/ws (Cloudflare Tunnel → :{PORT})")
+        else:
+            logger.warning(f"  WSS disabled: cert/key not found in {CERT_DIR}")
+
+        # WebSocket-level keepalive: server pings client every 20s,
+        # closes if no pong within 10s. This keeps the connection alive
+        # through Cloudflare Tunnel which may otherwise drop idle TCP connections.
+        ws_kwargs = {
+            "ping_interval": 20,    # send Ping every 20s
+            "ping_timeout": 10,     # wait 10s for Pong before closing
+            "close_timeout": 5,     # max wait for close handshake
+        }
+        if ssl_context:
+            # Serve both WS (LAN, plain) and WSS (WAN, encrypted)
+            import websockets
+            async with serve(self.handle_connection, HOST, PORT, **ws_kwargs), \
+                       serve(self.handle_connection, HOST, WSS_PORT, ssl=ssl_context, **ws_kwargs):
+                logger.info(f"Server ready — waiting for AI Cat connections...")
+                await asyncio.get_running_loop().create_future()
+        else:
+            async with serve(self.handle_connection, HOST, PORT, **ws_kwargs):
+                logger.info(f"Server ready — waiting for AI Cat connections...")
+                await asyncio.get_running_loop().create_future()
 
 
 if __name__ == "__main__":
