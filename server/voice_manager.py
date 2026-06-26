@@ -158,7 +158,7 @@ class VoiceManager:
         return False
 
     def add_custom_voice(self, name: str, ref_audio_path: str,
-                         prompt_text: str = "", engine: str = "fish-speech") -> VoiceProfile | None:
+                         prompt_text: str = "", engine: str = "qwen-tts") -> VoiceProfile | None:
         """Register a new cloned voice from a reference audio file.
 
         Copies the reference audio into voices/ directory.

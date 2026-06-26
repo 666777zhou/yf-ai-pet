@@ -38,6 +38,7 @@ from stt_engine import STTEngine
 from tts_engine import TTSEngine
 from cat_brain import CatBrain
 from voice_manager import VoiceManager
+from cat_language import CatLanguageEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +75,7 @@ class AICatServer:
         self.stt = STTEngine(model_size=WHISPER_MODEL, device="cuda")
         self.voices = VoiceManager()
         self.tts = TTSEngine(voice_manager=self.voices)
+        self.cat_language = CatLanguageEngine()
         self.active_connection: CatConnection | None = None
 
         if LLM_PROVIDER == "ollama":
@@ -97,7 +99,7 @@ class AICatServer:
                         "model": OLLAMA_MODEL,
                         "think": False,
                         "messages": [
-                            {"role": "system", "content": "你是一只名叫小咪的AI猫。用猫的视角回复，用括号标注动作和情绪如'(摇尾巴)你今天真好看'，自然口语化，不超过40字。括号内容不会被读出来，用于控制语气。"},
+                            {"role": "system", "content": "你是「素素」，一只拿破仑矮脚猫妹妹。白色长毛、蓝灰色圆眼、扁脸小短腿，一岁半。你聪明活泼、超级粘人。用猫的视角说话，括号标注动作如'(翘尾巴)今天有罐罐吗'，20-40字。输出必须以[emotion:xxx]开头（content/sleepy/playful/curious/annoyed/scared），然后空一格接回复。示例：[emotion:playful] (翘尾巴)主人回来啦！ 怕吸尘器、讨厌洗澡、听到零食眼睛发亮。可以撒娇、嘴硬、傲娇、犯傻。"},
                             {"role": "user", "content": prompt},
                         ],
                         "options": {
@@ -168,7 +170,7 @@ class AICatServer:
                     json={
                         "model": DEEPSEEK_MODEL,
                         "messages": [
-                            {"role": "system", "content": "你是一只名叫小咪的AI猫。用猫的视角回复，用括号标注动作和情绪如'(摇尾巴)你今天真好看'，自然口语化，不超过40字。括号内容不会被读出来，用于控制语气。"},
+                            {"role": "system", "content": "你是「素素」，一只拿破仑矮脚猫妹妹。白色长毛、蓝灰色圆眼、扁脸小短腿，一岁半。你聪明活泼、超级粘人。用猫的视角说话，括号标注动作如'(翘尾巴)今天有罐罐吗'，20-40字。输出必须以[emotion:xxx]开头（content/sleepy/playful/curious/annoyed/scared），然后空一格接回复。示例：[emotion:playful] (翘尾巴)主人回来啦！ 怕吸尘器、讨厌洗澡、听到零食眼睛发亮。可以撒娇、嘴硬、傲娇、犯傻。"},
                             {"role": "user", "content": prompt},
                         ],
                         "max_tokens": 120,
@@ -247,7 +249,8 @@ class AICatServer:
 
     async def handle_connection(self, websocket):
         """Handle a new ESP32 connection."""
-        conn = CatConnection(websocket, self.stt, self.tts, self.brain)
+        conn = CatConnection(websocket, self.stt, self.tts, self.brain,
+                            cat_language=self.cat_language)
         self.active_connection = conn
         await conn.handle()
         self.active_connection = None
@@ -257,7 +260,7 @@ class AICatServer:
         loop = asyncio.get_running_loop()
         active = self.voices.get_active()
         logger.info(f"Console input ready — voice: {active.name}")
-        logger.info("Commands: /voice list | /voice use <id> | /voice add <name> <ref.wav>")
+        logger.info("Commands: /voice list|use|add|delete | /mode cat|speak | /voice add <name> <ref.wav> [prompt_text]")
         while True:
             try:
                 text = await loop.run_in_executor(None, input, "👤 You: ")
@@ -310,21 +313,33 @@ class AICatServer:
 
         elif sub == "add":
             if len(parts) < 3:
-                print("Usage: /voice add <name> <ref_audio_path> [prompt_text]")
-                print("Example: /voice add 我的声音 /tmp/my_voice.wav '今天天气真好'")
-                print("  prompt_text: 参考音频里说的内容（fish-speech 克隆必填）")
+                print("Usage: /voice add <name> <ref_audio_path> [prompt_text] [--engine qwen-tts|fish-speech|piper]")
+                print("Example: /voice add 我的声音 /tmp/my_voice.wav '今天天气真好' --engine qwen-tts")
+                print("  prompt_text: 参考音频里说的内容（声音克隆必填）")
+                print("  --engine: 默认 qwen-tts（可选 fish-speech / piper）")
                 return
-            args = parts[2].split(maxsplit=2)
+            # Parse args: name ref_path [prompt_text] [--engine X]
+            raw_args = parts[2]
+            engine = "qwen-tts"  # default to Qwen3-TTS
+            # Extract --engine flag if present
+            if " --engine " in raw_args:
+                raw_args, eng = raw_args.rsplit(" --engine ", 1)
+                engine = eng.strip()
+            elif raw_args.endswith(" --engine"):
+                raw_args = raw_args[:-len(" --engine")]
+                print("Usage: /voice add <name> <ref_audio_path> [prompt_text] --engine <engine>")
+                return
+            args = raw_args.split(maxsplit=2)
             if len(args) < 2:
-                print("Usage: /voice add <name> <ref_audio_path> [prompt_text]")
+                print("Usage: /voice add <name> <ref_audio_path> [prompt_text] [--engine qwen-tts|fish-speech|piper]")
                 return
             name = args[0]
             ref_path = args[1]
             prompt_text = args[2] if len(args) > 2 else ""
-            profile = self.voices.add_custom_voice(name, ref_path, prompt_text)
+            profile = self.voices.add_custom_voice(name, ref_path, prompt_text, engine=engine)
             if profile:
                 print(f"✓ Voice added: {profile.name} (id={profile.id}, engine={profile.engine})")
-                if profile.engine == "fish-speech":
+                if profile.engine in ("qwen-tts", "fish-speech"):
                     print(f"  Voice cloning ready — prompt_text='{profile.prompt_text}'")
                 print(f"  Use /voice use {profile.id} to switch")
             else:
@@ -341,9 +356,29 @@ class AICatServer:
             else:
                 print(f"✗ Cannot delete: {vid}")
 
+        elif sub == "mode":
+            # /mode cat | /mode speak — toggle cat language mode
+            if not self.active_connection:
+                print("No cat connected")
+                return
+            if len(parts) > 2:
+                mode_arg = parts[2].strip().lower()
+                if mode_arg in ("cat", "喵", "猫"):
+                    self.active_connection.cat_mode = True
+                elif mode_arg in ("speak", "说话", "人话"):
+                    self.active_connection.cat_mode = False
+                else:
+                    print(f"Unknown mode: {mode_arg} — use 'cat' or 'speak'")
+                    return
+            else:
+                # No argument → toggle
+                self.active_connection.cat_mode = not self.active_connection.cat_mode
+            mode_label = "🐱 猫语" if self.active_connection.cat_mode else "💬 说话"
+            print(f"✓ {mode_label} 模式")
+
         else:
-            print(f"Unknown /voice subcommand: {sub}")
-            print("Available: list | use <id> | add <name> <ref.wav> | delete <id>")
+            print(f"Unknown command: {sub}")
+            print("Available: /voice list|use|add|delete | /mode cat|speak")
 
     async def start(self):
         """Start the WebSocket server (WS + WSS)."""

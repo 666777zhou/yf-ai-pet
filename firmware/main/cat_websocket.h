@@ -45,6 +45,9 @@ public:
     // Send sensor data (JSON) — non-blocking, pushes to sender queue
     void SendSensorData(const SensorPacket& sensor);
 
+    // Send arbitrary JSON text — non-blocking
+    void SendJson(const std::string& json_str);
+
     // Send audio frame (raw Opus bytes) — non-blocking, pushes to sender queue
     void SendAudio(const std::vector<uint8_t>& opus_frame);
 

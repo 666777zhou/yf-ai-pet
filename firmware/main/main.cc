@@ -353,21 +353,33 @@ extern "C" void app_main(void) {
             }
         }
 
-        // BOOT button long-press (3s) → reset WiFi and reboot into provisioning
-        // Uses elapsed time (not counter) so it survives blocking calls like WebSocket Connect
+        // BOOT button:
+        //   short press (<1s) → toggle cat language mode (sends event to server)
+        //   long press (>3s) → reset WiFi and reboot into provisioning
         static int64_t boot_press_start = 0;
+        static bool boot_long_press_handled = false;
         bool boot_pressed = (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
+
         if (boot_pressed && boot_press_start == 0) {
             boot_press_start = now;  // press started
-        } else if (boot_pressed && (now - boot_press_start > 3000)) {
+            boot_long_press_handled = false;
+        } else if (boot_pressed && !boot_long_press_handled &&
+                   (now - boot_press_start > 3000)) {
             ESP_LOGI(TAG, "BOOT button held 3s — resetting WiFi");
+            boot_long_press_handled = true;
             auto& eye_disp = LvglEyeDisplay::GetInstance();
             eye_disp.ShowWifiInfo("Resetting WiFi...", "Restarting in AP mode");
             LvglEyeDisplay::RunLvgl();
             vTaskDelay(pdMS_TO_TICKS(500));
             WifiProvisioning::GetInstance().ResetToProvisioning();
-        } else if (!boot_pressed) {
-            boot_press_start = 0;  // released
+        } else if (!boot_pressed && boot_press_start > 0) {
+            // Button released — check if it was a short press
+            int64_t hold_duration = now - boot_press_start;
+            if (hold_duration > 50 && hold_duration < 1000 && !boot_long_press_handled) {
+                ESP_LOGI(TAG, "BOOT short press (%lldms) — toggling cat mode", hold_duration);
+                g_websocket.SendJson("{\"type\":\"button\",\"action\":\"short_press\"}");
+            }
+            boot_press_start = 0;
         }
 
         // Drive LVGL timers and rendering

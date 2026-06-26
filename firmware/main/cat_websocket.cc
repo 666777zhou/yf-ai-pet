@@ -325,6 +325,20 @@ void CatWebSocket::SendSensorData(const SensorPacket& sensor) {
     xSemaphoreGive(send_signal_);  // wake sender task
 }
 
+void CatWebSocket::SendJson(const std::string& json_str) {
+    if (!ws_handle_ || !connected_ || sender_stop_) return;
+
+    SendItem item;
+    item.is_binary = false;
+    item.data.assign(reinterpret_cast<const uint8_t*>(json_str.data()),
+                     reinterpret_cast<const uint8_t*>(json_str.data()) + json_str.size());
+
+    xSemaphoreTake(send_mutex_, portMAX_DELAY);
+    send_queue_.push(std::move(item));
+    xSemaphoreGive(send_mutex_);
+    xSemaphoreGive(send_signal_);
+}
+
 void CatWebSocket::SendAudio(const std::vector<uint8_t>& opus_frame) {
     if (!ws_handle_ || !connected_ || sender_stop_) return;
 

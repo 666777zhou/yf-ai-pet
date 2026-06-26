@@ -1,5 +1,5 @@
 {
-  "active": "qwen-xiaoye",
+  "active": "qwe-qwen3-susu",
   "profiles": {
     "qwen-xiaoye": {
       "id": "qwen-xiaoye",
@@ -24,6 +24,22 @@
       "model": "zh_CN-huayan-medium",
       "ref_audio": "",
       "prompt_text": ""
+    },
+    "fis-susu": {
+      "id": "fis-susu",
+      "name": "susu",
+      "engine": "fish-speech",
+      "model": "",
+      "ref_audio": "/home/zyf/Code/yf-ai-pet/server/voices/ref_fis-susu.wav",
+      "prompt_text": "帆帆，我是你的素素呀，我好喜欢你呀，你喜欢我吗？帆帆，素素会乖乖的在这里等您哦，您也要记得按时吃饭，好好工作，素素会一直想您的，不要让素素担心嘛。"
+    },
+    "qwe-qwen3-susu": {
+      "id": "qwe-qwen3-susu",
+      "name": "qwen3-susu",
+      "engine": "qwen-tts",
+      "model": "",
+      "ref_audio": "/home/zyf/Code/yf-ai-pet/server/voices/ref_qwe-qwen3-susu.wav",
+      "prompt_text": "帆帆，我是你的素素呀，我好喜欢你呀，你喜欢我吗？帆帆，素素会乖乖的在这里等您哦，您也要记得按时吃饭，好好工作，素素会一直想您的，不要让素素担心嘛。"
     }
   }
 }

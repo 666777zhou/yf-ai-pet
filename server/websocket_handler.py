@@ -23,11 +23,14 @@ class CatConnection:
     # Max conversation turns to keep for STT context
     MAX_CONTEXT_TURNS = 5
 
-    def __init__(self, websocket, stt: STTEngine, tts: TTSEngine, brain: CatBrain):
+    def __init__(self, websocket, stt: STTEngine, tts: TTSEngine, brain: CatBrain,
+                 cat_language=None):
         self.ws = websocket
         self.stt = stt
         self.tts = tts
         self.brain = brain
+        self.cat_language = cat_language  # CatLanguageEngine or None
+        self.cat_mode = False            # True → real cat sounds, False → TTS
         self.codec = OpusCodec()
         self.vad = VAD()
         self.pcm_buffer = bytearray()
@@ -87,16 +90,31 @@ class CatConnection:
             self.running = False  # signal _process_loop to stop
 
     async def _handle_json(self, text: str):
-        """Handle incoming JSON sensor data."""
+        """Handle incoming JSON sensor data or button events."""
         try:
             data = json.loads(text)
-            if data.get("type") == "sensors":
+            msg_type = data.get("type")
+
+            if msg_type == "sensors":
                 self.touch_values = [
                     data.get("touch_head", 0),
                     data.get("touch_back", 0),
                     data.get("touch_belly", 0),
                 ]
                 self.battery_pct = data.get("battery_pct", 100)
+
+            elif msg_type == "button":
+                action = data.get("action", "")
+                if action == "short_press":
+                    self.cat_mode = not self.cat_mode
+                    mode_label = "🐱 猫语" if self.cat_mode else "💬 说话"
+                    logger.info(f"BOOT button: cat mode → {mode_label}")
+                    # Send mode change notification to ESP32 (updates display)
+                    await self._send_command({
+                        "emotion": self.brain.emotion_fsm.current.value,
+                        "mode": "cat" if self.cat_mode else "speak",
+                    })
+
         except json.JSONDecodeError:
             pass
 
@@ -302,23 +320,47 @@ class CatConnection:
             # Record conversation turn for STT context in future utterances
             self._record_conversation(user_text, raw_text)
             self.brain.record_conversation(user_text, raw_text)
-            # Strip parenthetical stage directions before TTS
-            import re
-            speak_text = re.sub(r'[（(][^)）]*[)）]', '', raw_text).strip()
-            try:
-                opus_frames = await self.tts.synthesize_opus_frames(speak_text or raw_text)
-                if opus_frames:
-                    logger.info(f"TTS: {len(opus_frames)} Opus frames, sending to ESP32...")
-                    for i, frame in enumerate(opus_frames):
-                        await self.ws.send(frame)
-                        await asyncio.sleep(0.01)  # 10ms gap between frames
-                    logger.info(f"TTS: sent {len(opus_frames)} frames OK")
-                else:
-                    logger.warning("TTS returned empty data")
-            except Exception as e:
-                logger.error(f"TTS error: {e}")
+
+            # ---- Cat language mode: real cat sounds instead of TTS ----
+            if self.cat_mode and self.cat_language and self.cat_language.has_clips:
+                emotion = command.get("emotion", "curious")
+                logger.info(f"🐱 Cat mode: playing {emotion} sound")
+                try:
+                    opus_frames = await self.cat_language.generate(emotion)
+                    if opus_frames:
+                        for i, frame in enumerate(opus_frames):
+                            await self.ws.send(frame)
+                            await asyncio.sleep(0.01)
+                        logger.info(f"Cat sound: {len(opus_frames)} frames sent OK")
+                    else:
+                        logger.warning("Cat language returned empty — falling back to TTS")
+                        await self._send_tts(raw_text)
+                except Exception as e:
+                    logger.error(f"Cat language error: {e} — falling back to TTS")
+                    await self._send_tts(raw_text)
+                return
+
+            # ---- Normal mode: TTS ----
+            await self._send_tts(raw_text)
         else:
             logger.info("No response text generated")
+
+    async def _send_tts(self, raw_text: str):
+        """Synthesize TTS and send Opus frames. Shared helper."""
+        import re
+        speak_text = re.sub(r'[（(][^)）]*[)）]', '', raw_text).strip()
+        try:
+            opus_frames = await self.tts.synthesize_opus_frames(speak_text or raw_text)
+            if opus_frames:
+                logger.info(f"TTS: {len(opus_frames)} Opus frames, sending to ESP32...")
+                for i, frame in enumerate(opus_frames):
+                    await self.ws.send(frame)
+                    await asyncio.sleep(0.01)
+                logger.info(f"TTS: sent {len(opus_frames)} frames OK")
+            else:
+                logger.warning("TTS returned empty data")
+        except Exception as e:
+            logger.error(f"TTS error: {e}")
 
     async def feed_text(self, text: str):
         """Accept text input from console (bypasses STT pipeline)."""

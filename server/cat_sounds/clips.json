@@ -1,0 +1,110 @@
+{
+  "total_clips": 13,
+  "clips": [
+    {
+      "file": "distress_call_01.wav",
+      "source": "distress_call",
+      "duration_s": 2.3,
+      "emotions": [
+        "scared"
+      ]
+    },
+    {
+      "file": "distress_call_02.wav",
+      "source": "distress_call",
+      "duration_s": 2.3,
+      "emotions": [
+        "scared"
+      ]
+    },
+    {
+      "file": "distress_call_03.wav",
+      "source": "distress_call",
+      "duration_s": 2.3,
+      "emotions": [
+        "scared"
+      ]
+    },
+    {
+      "file": "hiss_and_spit_01.wav",
+      "source": "hiss_and_spit",
+      "duration_s": 2.31,
+      "emotions": [
+        "annoyed"
+      ]
+    },
+    {
+      "file": "miaow_01.wav",
+      "source": "miaow",
+      "duration_s": 2.5,
+      "emotions": [
+        "curious"
+      ]
+    },
+    {
+      "file": "miaow_02.wav",
+      "source": "miaow",
+      "duration_s": 2.5,
+      "emotions": [
+        "curious"
+      ]
+    },
+    {
+      "file": "scream_screech_01.wav",
+      "source": "scream_screech",
+      "duration_s": 2.97,
+      "emotions": [
+        "scared"
+      ]
+    },
+    {
+      "file": "snarl_and_growl_01.wav",
+      "source": "snarl_and_growl",
+      "duration_s": 2.3,
+      "emotions": [
+        "annoyed"
+      ]
+    },
+    {
+      "file": "snarl_and_growl_02.wav",
+      "source": "snarl_and_growl",
+      "duration_s": 2.3,
+      "emotions": [
+        "annoyed"
+      ]
+    },
+    {
+      "file": "snarl_and_growl_03.wav",
+      "source": "snarl_and_growl",
+      "duration_s": 2.3,
+      "emotions": [
+        "annoyed"
+      ]
+    },
+    {
+      "file": "trill_01.wav",
+      "source": "trill",
+      "duration_s": 2.5,
+      "emotions": [
+        "playful"
+      ]
+    },
+    {
+      "file": "trill_02.wav",
+      "source": "trill",
+      "duration_s": 2.5,
+      "emotions": [
+        "playful"
+      ]
+    },
+    {
+      "file": "purring_10s.wav",
+      "source": "purring",
+      "duration_s": 10.0,
+      "emotions": [
+        "content",
+        "sleepy"
+      ]
+    }
+  ]
+}
